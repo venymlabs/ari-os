@@ -1,0 +1,24 @@
+[Unit]
+Description=Robinhood Agent OS Telegram gateway
+After=network-online.target raos-api.service
+Wants=network-online.target
+Requires=raos-api.service
+
+[Service]
+Type=simple
+User=raos
+Group=raos
+WorkingDirectory=/opt/robinhood-agent-os
+EnvironmentFile=/etc/raos/raos.env
+StateDirectory=raos
+ExecStart=/usr/bin/env raos-telegram
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/raos
+
+[Install]
+WantedBy=multi-user.target

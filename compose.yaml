@@ -1,0 +1,36 @@
+name: robinhood-agent-os
+x-raos: &raos
+  build: .
+  image: robinhood-agent-os:local
+  restart: unless-stopped
+  init: true
+  read_only: true
+  tmpfs: [/tmp]
+  security_opt: [no-new-privileges:true]
+  cap_drop: [ALL]
+  env_file: [.env]
+  volumes: [raos-data:/var/lib/raos]
+services:
+  migrate:
+    <<: *raos
+    restart: "no"
+    command: ["npm","run","db:migrate"]
+    profiles: [migrate]
+  api:
+    <<: *raos
+    command: ["node","dist/server.js"]
+    ports: ["127.0.0.1:8787:8787"]
+  worker:
+    <<: *raos
+    command: ["npm","run","worker"]
+    profiles: [workers]
+  indexer:
+    <<: *raos
+    command: ["npm","run","indexer"]
+    profiles: [workers]
+  telegram:
+    <<: *raos
+    command: ["npm","run","telegram"]
+    profiles: [telegram]
+volumes:
+  raos-data: {}

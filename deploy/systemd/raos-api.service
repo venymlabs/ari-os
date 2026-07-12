@@ -1,0 +1,30 @@
+[Unit]
+Description=Robinhood Agent OS API
+After=network-online.target raos-migrate.service
+Wants=network-online.target
+Requires=raos-migrate.service
+
+[Service]
+Type=simple
+User=raos
+Group=raos
+WorkingDirectory=/opt/robinhood-agent-os
+EnvironmentFile=/etc/raos/raos.env
+StateDirectory=raos
+ExecStart=/usr/bin/node /opt/robinhood-agent-os/dist/server.js
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/raos
+CapabilityBoundingSet=
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictSUIDSGID=true
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

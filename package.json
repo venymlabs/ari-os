@@ -1,0 +1,67 @@
+{
+  "name": "robinhood-agent-os",
+  "version": "0.1.0",
+  "description": "Testnet-first agent runtime and execution-safety toolkit for Robinhood Chain",
+  "private": false,
+  "license": "MIT",
+  "type": "module",
+  "packageManager": "npm@10.9.2",
+  "bin": {
+    "raos": "dist/bin/robinhood-agent-os.js",
+    "raos-telegram": "dist/bin/telegram.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md"
+  ],
+  "scripts": {
+    "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
+    "test": "vitest run",
+    "test:unit": "vitest run --exclude tests/*.integration.test.ts",
+    "test:integration": "vitest run tests/*.integration.test.ts",
+    "test:smoke": "npm run smoke:composition",
+    "lint": "npm run typecheck",
+    "typecheck": "tsc --noEmit",
+    "build": "npm run clean && tsc -p tsconfig.build.json",
+    "verify": "npm run test && npm run typecheck && npm run build",
+    "prepublishOnly": "npm run verify",
+    "config:check": "node dist/bin/maintenance.js config",
+    "db:migrate": "node dist/bin/maintenance.js db:migrate",
+    "db:status": "node dist/bin/maintenance.js db:status",
+    "db:integrity": "node dist/bin/maintenance.js db:integrity",
+    "db:check": "npm run db:integrity",
+    "smoke:composition": "npm run build --silent && node dist/bin/smoke-composition.js",
+    "start": "node dist/server.js",
+    "dev": "npm run build --silent && node --watch dist/server.js",
+    "cli": "node dist/bin/robinhood-agent-os.js",
+    "worker": "node dist/bin/worker.js",
+    "telegram": "node dist/bin/telegram.js",
+    "indexer": "node dist/bin/indexer.js",
+    "dashboard:build": "node -e \"console.log('dashboard not included in phases 0-5')\""
+  },
+  "dependencies": {
+    "@fastify/cors": "^11.3.0",
+    "fastify": "^5.10.0",
+    "viem": "^2.55.0",
+    "yaml": "^2.9.0",
+    "zod": "^3.25.76",
+    "zod-to-json-schema": "^3.25.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.4"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "main": "index.js",
+  "directories": {
+    "doc": "docs",
+    "test": "tests"
+  },
+  "keywords": [],
+  "author": ""
+}

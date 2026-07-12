@@ -1,0 +1,16 @@
+.git
+.env
+.env.*
+node_modules
+dist
+coverage
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.db
+*.log
+credentials*
+secrets*
+Dockerfile*
+compose*.yaml
+tests
