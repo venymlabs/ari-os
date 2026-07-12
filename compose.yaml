@@ -8,29 +8,66 @@ x-raos: &raos
   tmpfs: [/tmp]
   security_opt: [no-new-privileges:true]
   cap_drop: [ALL]
-  env_file: [.env]
-  volumes: [raos-data:/var/lib/raos]
 services:
+  signer:
+    <<: *raos
+    command: ["node","dist/bin/signer.js","serve","--keystore","/run/secrets/raos/wallet.json","--policy","/run/secrets/raos/policy.json","--token","/run/secrets/raos/signer.token","--authorization-key","/run/secrets/raos/authorization.key","--key-id","${AUTHORIZATION_KEY_ID:-authorization-v1}","--db","/var/lib/raos-signer/replay.sqlite","--socket","/run/raos-signer/signer.sock","--rpc","${RPC_URL:?RPC_URL must be set}","--reconcile-interval-ms","15000"]
+    volumes: [raos-signer-state:/var/lib/raos-signer, raos-signer-runtime:/run/raos-signer, raos-secrets:/run/secrets/raos:ro]
+    healthcheck:
+      test: ["CMD","node","dist/bin/signer.js","request","--method","status","--socket","/run/raos-signer/signer.sock","--token","/run/secrets/raos/signer.token"]
+      interval: 5s
+      timeout: 2s
+      retries: 12
   migrate:
     <<: *raos
     restart: "no"
     command: ["npm","run","db:migrate"]
     profiles: [migrate]
+    volumes: [raos-data:/var/lib/raos]
   api:
     <<: *raos
     command: ["node","dist/server.js"]
+    environment:
+      NODE_ENV: production
+      RPC_URL: "${RPC_URL:?RPC_URL must be set}"
+      NETWORK: "${NETWORK:-mainnet}"
+      CHAIN_ID: "${CHAIN_ID:-4663}"
+      EXECUTION_MODE: "${EXECUTION_MODE:-dry-run}"
+      TRADING_ACCOUNT: "${TRADING_ACCOUNT:?TRADING_ACCOUNT must be set}"
+      TRADING_MAX_AMOUNT_IN: "${TRADING_MAX_AMOUNT_IN:?TRADING_MAX_AMOUNT_IN must be set}"
+      TRADING_ALLOWED_TOKENS: "${TRADING_ALLOWED_TOKENS:-}"
+      SIGNER_SOCKET_PATH: /run/raos-signer/signer.sock
+      SIGNER_TOKEN_PATH: /run/secrets/raos/signer.token
+      SIGNER_POLICY_PATH: /run/secrets/raos/policy.json
+      AUTHORIZATION_KEY_ID: "${AUTHORIZATION_KEY_ID:-authorization-v1}"
+      AUTHORIZATION_KEY_PATH: /run/secrets/raos/authorization.key
+      TRADING_RECONCILE_INTERVAL_MS: "${TRADING_RECONCILE_INTERVAL_MS:-15000}"
+      API_TENANT_ID: "${API_TENANT_ID:-raos-production}"
+      API_BEARER_TOKEN_SHA256: "${API_BEARER_TOKEN_SHA256:?API_BEARER_TOKEN_SHA256 must be set}"
+      API_SCOPES: "${API_SCOPES:-agent:read,agent:write,tool:read,tool:invoke,simulation:invoke,trading:quote,trading:execute,trading:approve,trading:submit,trading:read,trading:reconcile}"
     ports: ["127.0.0.1:8787:8787"]
+    volumes: [raos-data:/var/lib/raos, raos-signer-runtime:/run/raos-signer:ro, raos-secrets:/run/secrets/raos:ro]
+    depends_on:
+      signer: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD","node","-e","fetch('http://127.0.0.1:8787/readyz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
   worker:
     <<: *raos
     command: ["npm","run","worker"]
     profiles: [workers]
+    volumes: [raos-data:/var/lib/raos]
   indexer:
     <<: *raos
     command: ["npm","run","indexer"]
     profiles: [workers]
+    volumes: [raos-data:/var/lib/raos]
   telegram:
     <<: *raos
     command: ["npm","run","telegram"]
     profiles: [telegram]
+    volumes: [raos-data:/var/lib/raos]
 volumes:
   raos-data: {}
+  raos-signer-state: {}
+  raos-signer-runtime: {}
+  raos-secrets: {}

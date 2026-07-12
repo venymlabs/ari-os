@@ -1,0 +1,24 @@
+[Unit]
+Description=RAOS isolated transaction signer
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=raos-signer
+Group=raos-signer
+UMask=0077
+RuntimeDirectory=raos-signer
+StateDirectory=raos-signer
+EnvironmentFile=/etc/raos-signer/raos-signer.env
+ExecStart=/usr/bin/node /opt/robinhood-agent-os/dist/bin/signer.js serve --keystore /etc/raos-signer/wallet.json --policy /etc/raos-signer/policy.json --token /etc/raos-signer/signer.token --authorization-key /etc/raos-signer/authorization.key --key-id ${AUTHORIZATION_KEY_ID} --db /var/lib/raos-signer/replay.sqlite --socket /run/raos-signer/signer.sock --rpc ${RPC_URL} --reconcile-interval-ms 15000
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/raos-signer /run/raos-signer
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

@@ -11,7 +11,9 @@ ARI OS gives an AI agent memory, tools, durable jobs, market intelligence, appro
 </div>
 
 > [!IMPORTANT]
-> The current release is **testnet-first and read-only**. Transaction signing, private-key custody, and broadcasting are deliberately unavailable. ARI OS can inspect, reason, simulate, and prepare evidence. It cannot move funds.
+> ARI OS supports funded Robinhood Chain mainnet execution through an isolated, policy-constrained signer. Live mode is triple-opt-in and is not safe by default: verify the build, audit policy and contract addresses, use a dedicated minimally funded wallet, and follow the [trading runbook](docs/TRADING.md). Passing tests is not a security audit.
+
+Production quick start: verify the clone, run `npm run setup:trading -- --account <address> --rpc <url>`, create the keystore with `npm run signer -- create`, then configure the signer, approval keys, API, and recovery loop exactly as described in the [trading runbook](docs/TRADING.md). Supported lifecycle commands include `trade quote`, `buy`/`sell`, `approve`/`deny`, `submit`, `status`, and `reconcile`; there is no CLI allowance-revoke command.
 
 ## Why ARI OS exists
 
@@ -61,7 +63,7 @@ flowchart LR
     style X stroke-dasharray: 5 5
 ```
 
-The dashed edge matters. ARI OS does not contain a hot wallet or a signing key. A future signer must independently decode the serialized transaction, verify every authorization claim, recheck the nonce, and atomically consume the envelope before signing.
+The dashed edge matters. The shipped `raos-signer` process owns the encrypted keystore outside the API/model process. It independently decodes the serialized transaction, verifies policy and authorization claims, rechecks the nonce, and atomically consumes the one-time envelope before signing and broadcasting.
 
 ## Quickstart
 
@@ -149,7 +151,7 @@ export MAINNET_ENABLED=true
 export MAINNET_ACKNOWLEDGE_RISK=I_ACKNOWLEDGE_MAINNET_RISK
 ```
 
-This only unlocks mainnet **read access**. It does not enable signing or broadcasting.
+This unlocks mainnet selection only. Funded execution additionally requires `EXECUTION_MODE=live`, `LIVE_TRADING_ENABLED=true`, `LIVE_TRADING_ACKNOWLEDGE_RISK=I_ACKNOWLEDGE_LIVE_TRADING_RISK`, trading limits/account, private approval and authorization key files, and the isolated signer. See [Production trading](docs/TRADING.md).
 
 ## API surface
 
@@ -170,6 +172,12 @@ The standalone server provides:
 | `POST /v1/simulate` | Read-only transaction simulation | Scoped bearer token |
 | `POST /v1/runs` | Start an asynchronous agent run | Scoped bearer token |
 | `GET /v1/runs/:id/events` | Resume run events over SSE | Scoped bearer token |
+| `POST /v1/trading/quote` | Quote and pin an exact simulated transaction | `trading:quote` |
+| `POST /v1/trading/execute` | Create an idempotent dry-run/live execution | `trading:execute` |
+| `GET /v1/trading/executions/:id` | Read durable execution/approval state | `trading:read` |
+| `POST /v1/trading/executions/:id/approve` | Submit operator approval proof | `trading:approve` |
+| `POST /v1/trading/executions/:id/submit` | Authorize, sign, and broadcast | `trading:submit` |
+| `POST /v1/trading/reconcile` | Recover and reconcile pending executions | `trading:reconcile` |
 
 Bind the server to localhost by default. Put it behind TLS and a trusted identity-aware reverse proxy before exposing it to a network.
 
@@ -220,17 +228,17 @@ Controls are independent by design:
 - Reservations count pending exposure before another trade can pass policy.
 - Approvals bind authenticated operators to an exact transaction and simulation.
 - Authorization envelopes are short-lived, one-time, and replay protected.
-- Signer-side verification is designed to recheck transaction fields and account nonce.
+- The isolated signer rechecks transaction fields, policy, authorization, replay state, and account nonce.
 - Audit events are append-only and can be anchored with Merkle roots.
 - Missing or unhealthy dependencies fail closed.
 
 ### What ARI OS does not claim
 
-- It is not a wallet.
+- It is not a general-purpose wallet; the signer is a narrow policy-constrained execution boundary.
 - It does not make smart contracts safe.
 - It does not remove oracle, sequencer, MEV, bridge, governance, or chain risk.
 - Passing tests is not a substitute for an external security audit.
-- The current release is not approved for funded autonomous execution.
+- Funded execution remains operator-controlled and high risk; deployment requires explicit live opt-ins, exact-transaction approval, and an independently reviewed policy.
 
 Read the full [security doctrine](docs/SECURITY.md) before extending the execution path.
 
@@ -248,8 +256,9 @@ npm pack --dry-run       # inspect the release artifact
 Current acceptance baseline:
 
 ```text
-37 test suites
-308 tests
+54 test suites
+392 tests
+3/3 live Robinhood RPC and deployed-bytecode checks
 Strict TypeScript build
 0 known production dependency vulnerabilities
 Clean npm tarball install verified
@@ -263,7 +272,7 @@ The repository includes:
 
 - A multi-stage, non-root [`Dockerfile`](Dockerfile)
 - Hardened [`compose.yaml`](compose.yaml) profiles
-- API, migration, and Telegram units under [`deploy/systemd`](deploy/systemd)
+- API, signer, migration, and Telegram units under [`deploy/systemd`](deploy/systemd)
 - Backup, recovery, and incident procedures in [`docs/OPERATIONS.md`](docs/OPERATIONS.md)
 
 Containers use a read-only root filesystem. Persistent state belongs under `/var/lib/raos`; `/tmp` is the only other writable path.
@@ -291,6 +300,8 @@ Deeper references:
 - [Architecture](docs/ARCHITECTURE.md)
 - [Security doctrine](docs/SECURITY.md)
 - [Operator runbook](docs/OPERATIONS.md)
+- [Production trading runbook](docs/TRADING.md)
+- [Production contracts and RPC behavior](docs/PRODUCTION-CONTRACTS.md)
 - [Research notes](docs/RESEARCH.md)
 - [Third-party notices](THIRD_PARTY_NOTICES.md)
 

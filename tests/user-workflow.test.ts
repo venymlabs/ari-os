@@ -1,0 +1,8 @@
+import {afterEach,describe,expect,it} from 'vitest';
+import {mkdtemp,readFile,rm,stat} from 'node:fs/promises';import {tmpdir} from 'node:os';import {join} from 'node:path';
+import {createUserWorkflow} from '../src/cli/user-workflow.js';
+const dirs:string[]=[];afterEach(()=>Promise.all(dirs.splice(0).map(x=>rm(x,{recursive:true,force:true}))));
+describe('clone-to-trade workflow',()=>{
+ it('initializes private config, policy, and socket token without returning the token',async()=>{const dir=await mkdtemp(join(tmpdir(),'raos-user-'));dirs.push(dir);const user=createUserWorkflow({dataDir:dir});const out:any=await user({group:'setup',action:'init',args:{}});expect(out.files).toEqual(expect.arrayContaining(['config.json','policy.json','signer.token']));expect(JSON.stringify(out)).not.toContain(await readFile(join(dir,'signer.token'),'utf8'));expect((await stat(join(dir,'signer.token'))).mode&0o077).toBe(0);expect(JSON.parse(await readFile(join(dir,'config.json'),'utf8')).mode).toBe('local')});
+ it('uses RPC for portfolio but refuses disconnected fake trades',async()=>{const dir=await mkdtemp(join(tmpdir(),'raos-user-'));dirs.push(dir);let calls=0;const user=createUserWorkflow({dataDir:dir,rpc:async(method)=>{calls++;if(method==='eth_getBalance')return '0x10';throw Error('unexpected')}});await user({group:'setup',action:'init',args:{}});const p:any=await user({group:'portfolio',action:'show',args:{address:'0x0000000000000000000000000000000000000001'}});expect(p.nativeBalance).toBe('16');await expect(user({group:'trade',action:'buy',args:{quoteId:'q',idempotencyKey:'same'}})).rejects.toThrow('trading service not configured');expect(calls).toBe(1);await expect(stat(join(dir,'trades.json'))).rejects.toThrow()});
+});

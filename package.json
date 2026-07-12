@@ -1,18 +1,23 @@
 {
   "name": "robinhood-agent-os",
   "version": "0.1.0",
-  "description": "Testnet-first agent runtime and execution-safety toolkit for Robinhood Chain",
+  "description": "Production-capable Robinhood Chain agent runtime with policy controls and an isolated signer",
   "private": false,
   "license": "MIT",
   "type": "module",
   "packageManager": "npm@10.9.2",
   "bin": {
     "raos": "dist/bin/robinhood-agent-os.js",
-    "raos-telegram": "dist/bin/telegram.js"
+    "raos-telegram": "dist/bin/telegram.js",
+    "raos-signer": "dist/bin/signer.js"
   },
   "files": [
     "dist",
     "README.md",
+    "docs",
+    "compose.yaml",
+    "deploy",
+    "templates",
     "LICENSE",
     "THIRD_PARTY_NOTICES.md"
   ],
@@ -25,7 +30,7 @@
     "lint": "npm run typecheck",
     "typecheck": "tsc --noEmit",
     "build": "npm run clean && tsc -p tsconfig.build.json",
-    "verify": "npm run test && npm run typecheck && npm run build",
+    "verify": "npm run build && npm run test && npm run typecheck",
     "prepublishOnly": "npm run verify",
     "config:check": "node dist/bin/maintenance.js config",
     "db:migrate": "node dist/bin/maintenance.js db:migrate",
@@ -39,6 +44,9 @@
     "worker": "node dist/bin/worker.js",
     "telegram": "node dist/bin/telegram.js",
     "indexer": "node dist/bin/indexer.js",
+    "signer": "node dist/bin/signer.js",
+    "setup:trading": "node dist/bin/robinhood-agent-os.js setup",
+    "trading:reconcile": "node dist/bin/robinhood-agent-os.js trade reconcile",
     "dashboard:build": "node -e \"console.log('dashboard not included in phases 0-5')\""
   },
   "dependencies": {

@@ -1,8 +1,8 @@
 [Unit]
 Description=Robinhood Agent OS API
-After=network-online.target raos-migrate.service
+After=network-online.target raos-migrate.service raos-signer.service
 Wants=network-online.target
-Requires=raos-migrate.service
+Requires=raos-migrate.service raos-signer.service
 
 [Service]
 Type=simple

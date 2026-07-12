@@ -2,7 +2,7 @@
 
 ## Security boundary
 
-This release is **read-only/testnet-first**. Signing, key custody, broadcast, and mainnet execution are absent. Never place private keys in environment files, CLI arguments, Telegram, logs, or the data directory. API authentication belongs at a trusted TLS reverse proxy until a production identity adapter is configured. Telegram is default-deny and identifies actors only by numeric user/chat IDs.
+This release supports explicitly enabled, policy-constrained Robinhood Chain mainnet execution through the isolated `raos-signer` service. Live execution is disabled unless every mainnet and live-trading acknowledgement is set, signer identity and policy readiness match, risk and reservation controls pass, and an exact transaction receives authenticated approval. Never place private keys in environment files, CLI arguments, Telegram, or logs. Keep the encrypted keystore and signer databases in the protected data directory. Put the API behind a trusted TLS reverse proxy before network exposure. Telegram is default-deny and identifies actors only by numeric user/chat IDs.
 
 ## Install and start
 
