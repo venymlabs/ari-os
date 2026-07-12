@@ -6,7 +6,7 @@
 
 ARI OS gives an AI agent memory, tools, durable jobs, market intelligence, approval workflows, and a hardened execution boundary. It is built for Robinhood Chain, runs independently of any agent framework, and ships with a CLI, HTTP API, Telegram adapter, worker, and NOXA indexer.
 
-[Architecture](#how-it-fits-together) · [Quickstart](#quickstart) · [Security](#the-security-boundary) · [Operations](docs/OPERATIONS.md)
+[Website](https://ari-os-site.vercel.app) · [Architecture](#how-it-fits-together) · [Quickstart](#quickstart) · [Security](#the-security-boundary) · [Operations](docs/OPERATIONS.md)
 
 </div>
 
