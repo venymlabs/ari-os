@@ -149,6 +149,45 @@ describe("live trading orchestration", () => {
     expect((await o.reconcile(id)).state).toBe("reconciliation-required");
     store.close();
   });
+  it("migrates legacy execution databases to indexed columns in place", async () => {
+    const path = join(temp(), "legacy.sqlite");
+    const { DatabaseSync } = await import("node:sqlite");
+    const raw = new DatabaseSync(path);
+    raw.exec(
+      "CREATE TABLE executions(id TEXT PRIMARY KEY,idempotency_key TEXT UNIQUE NOT NULL,payload TEXT NOT NULL);CREATE TABLE quotes(id TEXT PRIMARY KEY,payload TEXT NOT NULL)",
+    );
+    raw.prepare("INSERT INTO executions VALUES(?,?,?)").run(
+      "e1",
+      "k1",
+      JSON.stringify({
+        id: "e1",
+        version: 0,
+        quoteId: "q1",
+        intentHash: "i",
+        actor: "a",
+        dryRun: false,
+        idempotencyKey: "k1",
+        state: "broadcast",
+        createdAt: 1,
+        updatedAt: 1,
+      }),
+    );
+    raw
+      .prepare("INSERT INTO quotes VALUES(?,?)")
+      .run(
+        "q1",
+        JSON.stringify({ id: "q1", quoteHash: "qh-1", intentHash: "i" }),
+      );
+    raw.close();
+    const store = new ExecutionStore(path);
+    expect(store.findQuoteByHash("qh-1")?.id).toBe("q1");
+    expect(store.list(["broadcast"]).map((x) => x.id)).toEqual(["e1"]);
+    const moved = store.transition("e1", "broadcast", { state: "confirmed" });
+    expect(moved.state).toBe("confirmed");
+    expect(store.list(["broadcast"])).toEqual([]);
+    expect(store.list(["confirmed"]).map((x) => x.id)).toEqual(["e1"]);
+    store.close();
+  });
   it("rejects policy violations and arbitrary transaction fields", async () => {
     const o = new TradingOrchestrator({
       chainId: 46630,

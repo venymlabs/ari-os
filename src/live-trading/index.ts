@@ -154,13 +154,44 @@ export class ExecutionStore {
   constructor(path: string) {
     this.db = new DatabaseSync(path);
     this.db.exec(
-      `PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS executions(id TEXT PRIMARY KEY,idempotency_key TEXT UNIQUE NOT NULL,payload TEXT NOT NULL);CREATE TABLE IF NOT EXISTS quotes(id TEXT PRIMARY KEY,payload TEXT NOT NULL)`,
+      `PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS executions(id TEXT PRIMARY KEY,idempotency_key TEXT UNIQUE NOT NULL,payload TEXT NOT NULL,state TEXT);CREATE TABLE IF NOT EXISTS quotes(id TEXT PRIMARY KEY,payload TEXT NOT NULL,quote_hash TEXT)`,
+    );
+    // Databases created before the indexed columns existed are migrated
+    // in place; the JSON payload remains the source of truth.
+    const executionColumns = this.db
+      .prepare("PRAGMA table_info(executions)")
+      .all() as any[];
+    if (!executionColumns.some((c) => c.name === "state")) {
+      this.db.exec("ALTER TABLE executions ADD COLUMN state TEXT");
+      for (const row of this.db
+        .prepare("SELECT id,payload FROM executions")
+        .all() as any[])
+        this.db
+          .prepare("UPDATE executions SET state=? WHERE id=?")
+          .run((parse(String(row.payload)) as Execution).state, row.id);
+    }
+    const quoteColumns = this.db
+      .prepare("PRAGMA table_info(quotes)")
+      .all() as any[];
+    if (!quoteColumns.some((c) => c.name === "quote_hash")) {
+      this.db.exec("ALTER TABLE quotes ADD COLUMN quote_hash TEXT");
+      for (const row of this.db
+        .prepare("SELECT id,payload FROM quotes")
+        .all() as any[])
+        this.db
+          .prepare("UPDATE quotes SET quote_hash=? WHERE id=?")
+          .run((parse(String(row.payload)) as Quote).quoteHash, row.id);
+    }
+    this.db.exec(
+      "CREATE INDEX IF NOT EXISTS executions_state ON executions(state); CREATE INDEX IF NOT EXISTS quotes_quote_hash ON quotes(quote_hash)",
     );
   }
   putQuote(q: Quote) {
     this.db
-      .prepare("INSERT OR REPLACE INTO quotes VALUES(?,?)")
-      .run(q.id, json(q));
+      .prepare(
+        "INSERT OR REPLACE INTO quotes(id,payload,quote_hash) VALUES(?,?,?)",
+      )
+      .run(q.id, json(q), q.quoteHash);
     return q;
   }
   getQuote(id: string) {
@@ -170,10 +201,12 @@ export class ExecutionStore {
     return r ? (parse(String(r.payload)) as Quote) : undefined;
   }
   findQuoteByHash(hash: string) {
-    const rows = this.db.prepare("SELECT payload FROM quotes").all() as any[];
-    return rows
-      .map((r) => parse(String(r.payload)) as Quote)
-      .find((q) => q.quoteHash === hash);
+    const r = this.db
+      .prepare(
+        "SELECT payload FROM quotes WHERE quote_hash=? ORDER BY rowid LIMIT 1",
+      )
+      .get(hash) as any;
+    return r ? (parse(String(r.payload)) as Quote) : undefined;
   }
   create(
     x: Omit<Execution, "id" | "version" | "state" | "createdAt" | "updatedAt">,
@@ -189,8 +222,10 @@ export class ExecutionStore {
         updatedAt: now,
       };
     this.db
-      .prepare("INSERT INTO executions VALUES(?,?,?)")
-      .run(r.id, r.idempotencyKey, json(r));
+      .prepare(
+        "INSERT INTO executions(id,idempotency_key,payload,state) VALUES(?,?,?,?)",
+      )
+      .run(r.id, r.idempotencyKey, json(r), r.state);
     return r;
   }
   get(id: string) {
@@ -207,10 +242,14 @@ export class ExecutionStore {
   }
   list(states: readonly TradeState[]) {
     if (!states.length) return [];
-    const wanted = new Set(states);
-    return (this.db.prepare("SELECT payload FROM executions").all() as any[])
-      .map((r) => parse(String(r.payload)) as Execution)
-      .filter((x) => wanted.has(x.state));
+    const marks = states.map(() => "?").join(",");
+    return (
+      this.db
+        .prepare(
+          `SELECT payload FROM executions WHERE state IN (${marks}) ORDER BY rowid`,
+        )
+        .all(...states) as any[]
+    ).map((r) => parse(String(r.payload)) as Execution);
   }
   transition(
     id: string,
@@ -234,8 +273,10 @@ export class ExecutionStore {
         updatedAt: Date.now(),
       };
       const r = this.db
-        .prepare("UPDATE executions SET payload=? WHERE id=? AND payload=?")
-        .run(json(x), id, json(old));
+        .prepare(
+          "UPDATE executions SET payload=?,state=? WHERE id=? AND payload=?",
+        )
+        .run(json(x), x.state, id, json(old));
       if (Number(r.changes) !== 1) throw Error("state conflict");
       this.db.exec("COMMIT");
       return x;
