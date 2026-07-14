@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import Fastify from "fastify";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {

@@ -8,6 +8,7 @@ export function registerTradingApi(
       TradingOrchestrator,
       | "quote"
       | "execute"
+      | "revoke"
       | "status"
       | "approve"
       | "refreshApproval"
@@ -17,7 +18,13 @@ export function registerTradingApi(
     principal: (q: FastifyRequest) => Principal;
   },
 ) {
-  const denied = (q: FastifyRequest, r: any, scope: string) => {
+  // Routes accept the documented scope plus any legacy alias that older
+  // deployments may already have granted.
+  const denied = (
+      q: FastifyRequest,
+      r: any,
+      ...scopes: [string, ...string[]]
+    ) => {
       const principal = c.principal(q);
       if (principal.authenticated === false) {
         r.code(401).send({
@@ -25,9 +32,9 @@ export function registerTradingApi(
         });
         return true;
       }
-      if (!principal.scopes.includes(scope)) {
+      if (!scopes.some((scope) => principal.scopes.includes(scope))) {
         r.code(403).send({
-          error: { code: "FORBIDDEN", message: `Missing ${scope}` },
+          error: { code: "FORBIDDEN", message: `Missing ${scopes[0]}` },
         });
         return true;
       }
@@ -97,8 +104,29 @@ export function registerTradingApi(
       });
     }
   });
-  app.post("/v1/trading/executions/:id/submit", async (q: any, r) => {
+  app.post("/v1/trading/revoke", async (q: any, r) => {
     if (denied(q, r, "trading:execute")) return;
+    const k = key(q, r);
+    if (!k) return;
+    try {
+      return r.code(202).send(
+        await c.trading.revoke(q.body?.token, {
+          idempotencyKey: k,
+          actor: c.principal(q).subject,
+          dryRun: q.body?.dryRun ?? true,
+        }),
+      );
+    } catch (e) {
+      return r.code(409).send({
+        error: {
+          code: "REVOKE_REJECTED",
+          message: e instanceof Error ? e.message : "rejected",
+        },
+      });
+    }
+  });
+  app.post("/v1/trading/executions/:id/submit", async (q: any, r) => {
+    if (denied(q, r, "trading:submit", "trading:execute")) return;
     if (!key(q, r)) return;
     try {
       return r.code(202).send(await c.trading.submit(q.params.id));
@@ -116,7 +144,7 @@ export function registerTradingApi(
     return r.code(202).send(await c.trading.recoverAndReconcile());
   });
   app.get("/v1/trading/executions/:id", async (q: any, r) => {
-    if (denied(q, r, "trading:quote")) return;
+    if (denied(q, r, "trading:read", "trading:quote")) return;
     try {
       return c.trading.status(q.params.id);
     } catch {

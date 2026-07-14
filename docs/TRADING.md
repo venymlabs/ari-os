@@ -147,7 +147,26 @@ For a sell, use `trade quote --side sell`, then `trade sell ... --live`. To reje
 npm run cli -- trade deny --id <executionId> --reason "operator rejected"
 ```
 
-The current CLI has no `trade revoke` command. Revoke ERC-20 allowance using a separately trusted wallet and verify it on-chain; do not invent an unsupported control-plane command.
+To clear a router allowance, use `trade revoke`. It pins the exact
+`approve(router, 0)` transaction for the token and pushes it through the
+same lifecycle as a swap: risk assessment, exact-transaction operator
+approval, a one-time authorization envelope, and the isolated signer.
+
+```bash
+npm run cli -- trade revoke --token <tokenAddress> \
+  --idempotency-key revoke-001 --live
+npm run cli -- trade approve --id <executionId>
+npm run cli -- trade submit --id <executionId>
+```
+
+Without `--live` the revoke is a dry run. Two policy prerequisites for a
+live revoke: the signer policy's `dataPrefixes` must include the ERC-20
+approve selector `0x095ea7b3` (the default `setup` policy now includes
+it), and the token contract address must be listed in the signer
+policy's `to` allowlist — the signer refuses to call contracts that are
+not explicitly allowed. Verify the cleared allowance on-chain after
+finalization. If the control plane itself may be compromised, still
+prefer a separately trusted wallet.
 
 Never retry an uncertain order with a new idempotency key. Query its execution ID and reconcile it first. Local `trade reconcile` requires `--id`; automatic startup/interval recovery scans all pending durable executions.
 
@@ -157,6 +176,7 @@ The same lifecycle is exposed at:
 
 - `POST /v1/trading/quote`
 - `POST /v1/trading/execute` (requires `Idempotency-Key`)
+- `POST /v1/trading/revoke` (requires `Idempotency-Key`)
 - `GET /v1/trading/executions/:id`
 - `POST /v1/trading/executions/:id/approve` (requires proof and `Idempotency-Key`)
 - `POST /v1/trading/executions/:id/submit` (requires `Idempotency-Key`)
@@ -169,7 +189,7 @@ Use `Authorization: Bearer …` and the corresponding `trading:*` scope. Treat t
 1. Stop API/worker ingress immediately; preserve databases and logs.
 2. Stop the signer to remove signing/broadcast capability: `sudo systemctl stop raos-api raos-worker raos-signer` when using systemd.
 3. Remove network exposure and rotate API/signer/approval/authorization credentials if compromise is suspected. Rotation requires coordinated API and signer configuration.
-4. Use a separately trusted wallet to revoke router allowances when control-plane compromise is possible.
+4. Revoke router allowances: `trade revoke` when the control plane is still trusted, or a separately trusted wallet when control-plane compromise is possible.
 5. Restart the signer and one API instance, require `/readyz`, then reconcile every uncertain execution before restoring ingress.
 
 Manual signer-side reconciliation checks its durable broadcast records without signing or resubmitting:

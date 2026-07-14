@@ -28,6 +28,52 @@ describe("clone-to-trade workflow", () => {
       JSON.parse(await readFile(join(dir, "config.json"), "utf8")).mode,
     ).toBe("local");
   });
+  it("writes a default sign policy that can authorize allowance revokes", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "raos-user-"));
+    dirs.push(dir);
+    const user = createUserWorkflow({ dataDir: dir });
+    await user({ group: "setup", action: "init", args: {} });
+    const policy = JSON.parse(
+      await readFile(join(dir, "sign-policy.json"), "utf8"),
+    );
+    expect(policy.dataPrefixes).toContain("0x095ea7b3");
+  });
+  it("routes trade revoke to the orchestrator with normalized token and dry-run default", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "raos-user-"));
+    dirs.push(dir);
+    const calls: unknown[] = [];
+    const user = createUserWorkflow({
+      dataDir: dir,
+      trading: {
+        revoke: (async (token: string, o: unknown) => {
+          calls.push([token, o]);
+          return { id: "x", state: "dry-run" };
+        }) as any,
+      } as any,
+    });
+    const out: any = await user({
+      group: "trade",
+      action: "revoke",
+      args: {
+        token: "0x00000000000000000000000000000000000000aa",
+        idempotencyKey: "k1",
+      },
+    });
+    expect(out.state).toBe("dry-run");
+    expect(calls).toEqual([
+      [
+        "0x00000000000000000000000000000000000000AA",
+        { idempotencyKey: "k1", actor: "cli", dryRun: true },
+      ],
+    ]);
+    await expect(
+      user({
+        group: "trade",
+        action: "revoke",
+        args: { token: "nope", idempotencyKey: "k2" },
+      }),
+    ).rejects.toThrow();
+  });
   it("uses RPC for portfolio but refuses disconnected fake trades", async () => {
     const dir = await mkdtemp(join(tmpdir(), "raos-user-"));
     dirs.push(dir);

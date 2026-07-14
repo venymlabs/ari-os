@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -10,7 +10,8 @@ import {
   createTradingComposition,
 } from "../src/app/index.js";
 import { createStandaloneServer } from "../src/server.js";
-import { encodeAbiParameters } from "viem";
+import { encodeAbiParameters, encodeFunctionData } from "viem";
+import { ERC20_ABI } from "../src/trading/index.js";
 import { ApprovalEngine } from "../src/execution/approvals/index.js";
 import { AuthorizationIssuer } from "../src/execution/authorization/index.js";
 import {
@@ -322,6 +323,86 @@ describe("live trading configuration and production composition", () => {
     composition.close();
     await new Promise<void>((r) => server.close(() => r()));
   });
+  it("assesses revokes as the exact approve(router, 0) transaction only", async () => {
+    const d = temp(),
+      H = `0x${"11".repeat(32)}`;
+    const fetch = vi.fn(async (_u: any, init: any) => {
+      const x = JSON.parse(init.body);
+      const result =
+        x.method === "eth_getBlockByNumber"
+          ? {
+              number: "0xa",
+              hash: H,
+              parentHash: `0x${"22".repeat(32)}`,
+              timestamp: "0x1",
+              transactions: [],
+            }
+          : "0x0";
+      return new Response(JSON.stringify({ jsonrpc: "2.0", id: x.id, result }));
+    });
+    const composition = createTradingComposition(
+      loadConfig(liveEnv(d)),
+      fetch as any,
+    )!;
+    const router = composition.riskEvaluator!.limits.routers[0]!;
+    const data = encodeFunctionData({
+      abi: ERC20_ABI,
+      functionName: "approve",
+      args: [router as `0x${string}`, 0n],
+    });
+    const transaction = {
+      chainId: 4663,
+      from: A,
+      to: B,
+      data,
+      value: 0n,
+      gas: 60000n,
+      nonce: 7,
+      maxFeePerGas: 20n,
+    };
+    const wrapped = {
+      quote: {
+        side: "revoke",
+        tokenIn: B,
+        blockNumber: 10n,
+        blockHash: H,
+        expiresAt: Date.now() + 30_000,
+      },
+      request: { transaction, transactionHash: `0x${"33".repeat(32)}` },
+      evidence: { blockHash: H },
+    };
+    expect(await composition.risk!.assess(wrapped)).toMatchObject({
+      allowed: true,
+      reasons: [],
+    });
+    const tamperedData = encodeFunctionData({
+      abi: ERC20_ABI,
+      functionName: "approve",
+      args: [router as `0x${string}`, 1n],
+    });
+    for (const [change, reason] of [
+      [{ data: tamperedData }, "revoke_calldata_mismatch"],
+      [{ to: A }, "revoke_target_mismatch"],
+      [{ value: 5n }, "revoke_value_nonzero"],
+      [{ from: B }, "account_not_allowed"],
+    ] as const) {
+      const verdict: any = await composition.risk!.assess({
+        ...wrapped,
+        request: {
+          ...wrapped.request,
+          transaction: { ...transaction, ...change },
+        },
+      });
+      expect(verdict.allowed).toBe(false);
+      expect(verdict.reasons).toContain(reason);
+    }
+    const stale: any = await composition.risk!.assess({
+      ...wrapped,
+      quote: { ...wrapped.quote, expiresAt: Date.now() - 1 },
+    });
+    expect(stale.reasons).toContain("quote_stale");
+    composition.close();
+  });
   it("mounts authenticated trading API on the shipped server", async () => {
     const d = temp();
     const s = await createStandaloneServer(
@@ -356,6 +437,14 @@ describe("live trading configuration and production composition", () => {
         })
       ).statusCode,
     ).not.toBe(404);
+    const revokeWithoutKey = await s.inject({
+      method: "POST",
+      url: "/v1/trading/revoke",
+      headers: { authorization: "Bearer api" },
+      payload: { token: B },
+    });
+    expect(revokeWithoutKey.statusCode).toBe(400);
+    expect(revokeWithoutKey.json().error.code).toBe("IDEMPOTENCY_KEY_REQUIRED");
     await s.close();
   });
 });

@@ -86,6 +86,7 @@ async function localServices(): Promise<{
       ? {
           quote: t.quote.bind(t),
           execute: t.execute.bind(t),
+          revoke: t.revoke.bind(t),
           approve: t.approve.bind(t),
           deny: t.deny.bind(t),
           submit: t.submit.bind(t),
@@ -196,6 +197,12 @@ export function createRemoteServices(
         method: "POST",
         headers: { "idempotency-key": x.idempotencyKey },
         body: JSON.stringify({ quoteId, dryRun: x.dryRun }),
+      }),
+    revoke: (token: string, x: any) =>
+      call("v1/trading/revoke", {
+        method: "POST",
+        headers: { "idempotency-key": x.idempotencyKey },
+        body: JSON.stringify({ token, dryRun: x.dryRun }),
       }),
     approve: (id: string, _operator: string, x: unknown) =>
       call(`v1/trading/executions/${id}/approve`, {

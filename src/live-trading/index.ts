@@ -26,6 +26,7 @@ const parse = (x: string) =>
 const digest = (x: unknown) =>
   createHash("sha256").update(json(x)).digest("hex");
 export type TradeSide = "buy" | "sell";
+export type QuoteSide = TradeSide | "revoke";
 export type TradeState =
   | "awaiting-approval"
   | "approved"
@@ -66,6 +67,8 @@ export interface TradingRpc {
     tokenOut: Address;
     amountIn: bigint;
   }): Promise<QuoteResult>;
+  /** Build and simulate the exact approve(spender, 0) transaction. */
+  revokeQuote?(x: { token: Address; spender: Address }): Promise<QuoteResult>;
   simulate(
     x: SimulationRequest | Record<string, unknown>,
   ): Promise<
@@ -103,7 +106,7 @@ export interface SignerStatus {
 }
 type Quote = {
   id: string;
-  side: TradeSide;
+  side: QuoteSide;
   tokenIn: Address;
   tokenOut: Address;
   amountIn: bigint;
@@ -295,6 +298,7 @@ export class TradingOrchestrator {
       )
     )
       throw Error("unknown field");
+    if (raw.side !== "buy" && raw.side !== "sell") throw Error("invalid side");
     if (raw.amountIn <= 0n || raw.amountIn > this.c.policy.maxAmountIn)
       throw Error("amount exceeds policy");
     if (raw.slippageBps < 0 || raw.slippageBps > this.c.policy.maxSlippageBps)
@@ -341,6 +345,62 @@ export class TradingOrchestrator {
         : {}),
     };
     return this.c.store.putQuote(q);
+  }
+  /**
+   * Pin the exact ERC-20 approve(router, 0) transaction that clears the
+   * router allowance for a token. The result flows through the same
+   * lifecycle as a swap quote: execute -> approve -> submit -> reconcile,
+   * with exact-transaction approval, one-time authorization, and the
+   * isolated signer's own policy checks. The token is deliberately not
+   * restricted to the trading allowlist: revoking an allowance only ever
+   * reduces exposure, and operators most need it for tokens they no
+   * longer trust; the signer policy's `to` allowlist remains the final
+   * authority on which contracts may be called.
+   */
+  async revokeQuote(tokenRaw: Address) {
+    const token = getAddress(tokenRaw),
+      spender = getAddress(this.c.router);
+    if (!this.c.rpc.revokeQuote) throw Error("revoke_unsupported");
+    const r = await this.c.rpc.revokeQuote({ token, spender });
+    if (!r.request || !r.evidence) throw Error("exact_transaction_required");
+    const policyHash = this.c.policy.hash ?? digest(this.c.policy);
+    const core = {
+      side: "revoke" as const,
+      chainId: this.c.chainId,
+      account: getAddress(this.c.account),
+      router: spender,
+      token,
+      policyHash,
+      blockNumber: r.blockNumber,
+      blockHash: r.blockHash ?? r.evidence.blockHash,
+      expiresAt: r.expiresAt,
+      serialized: r.request.serialized,
+    };
+    const q: Quote = {
+      id: randomUUID(),
+      side: "revoke",
+      tokenIn: token,
+      tokenOut: token,
+      amountIn: 0n,
+      slippageBps: 0,
+      ...r,
+      minimumOut: 0n,
+      policyHash,
+      intentHash: digest(core),
+      quoteHash: digest({ ...core, evidenceHash: r.evidence.hash }),
+      serialized: r.request.serialized,
+      transactionHash: r.request.transactionHash,
+    };
+    return this.c.store.putQuote(q);
+  }
+  async revoke(
+    tokenRaw: Address,
+    o: { idempotencyKey: string; actor: string; dryRun?: boolean },
+  ) {
+    const old = this.c.store.byIdempotency(o.idempotencyKey);
+    if (old) return old;
+    const q = await this.revokeQuote(tokenRaw);
+    return this.execute(q.id, o);
   }
   async execute(
     quoteId: string,

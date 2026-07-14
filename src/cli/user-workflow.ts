@@ -10,7 +10,10 @@ type Rpc = (method: string, params: unknown[]) => Promise<any>;
 type Trading = Pick<
   TradingOrchestrator,
   "quote" | "execute" | "approve" | "deny" | "submit" | "status" | "reconcile"
-> & { portfolio?: () => Promise<unknown> };
+> & {
+  portfolio?: () => Promise<unknown>;
+  revoke?: TradingOrchestrator["revoke"];
+};
 type Proof = { operator: string } & Omit<DecisionInput, "operatorId">;
 type C = {
   dataDir: string;
@@ -140,7 +143,10 @@ export function createUserWorkflow(c: C) {
             maxGas: "500000",
             maxFeePerGas: "100000000000",
             maxPriorityFeePerGas: "5000000000",
-            dataPrefixes: ["0x04e45aaf", "0xb858183f"],
+            // exactInputSingle, exactInput, and ERC-20 approve — the last
+            // one so `trade revoke` can clear allowances once the token
+            // contract is added to `to`.
+            dataPrefixes: ["0x04e45aaf", "0xb858183f", "0x095ea7b3"],
           }),
         },
         ...[
@@ -201,6 +207,17 @@ export function createUserWorkflow(c: C) {
         actor: String(a.actor ?? "cli"),
         dryRun: a.live !== true,
       });
+    if (req.action === "revoke") {
+      if (!c.trading.revoke) throw Error("revoke unavailable in this mode");
+      return c.trading.revoke(
+        getAddress(required(a, "token")) as `0x${string}`,
+        {
+          idempotencyKey: required(a, "idempotencyKey"),
+          actor: String(a.actor ?? "cli"),
+          dryRun: a.live !== true,
+        },
+      );
+    }
     if (req.action === "approve" || req.action === "deny") {
       const id = required(a, "id"),
         decision = req.action;

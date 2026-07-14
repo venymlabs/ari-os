@@ -46,7 +46,8 @@ describe("clone-to-trade deployment", () => {
     expect(trading).toContain("--password-fd");
     expect(trading).toContain("--key-fd");
     expect(trading).not.toMatch(/--private-key|--password\s+\S+/);
-    expect(trading).toContain("no `trade revoke` command");
+    expect(trading).toContain("npm run cli -- trade revoke --token");
+    expect(trading).toContain("0x095ea7b3");
     expect(readme).not.toContain("read-only and cannot move funds");
   });
   it("describes the production package honestly and ships every deployment asset", async () => {

@@ -42,6 +42,7 @@ function userCommand(name: string, args: string[]): CliCommand | undefined {
       "quote",
       "buy",
       "sell",
+      "revoke",
       "approve",
       "deny",
       "submit",

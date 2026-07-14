@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { keccak256 } from "viem";
+import { encodeFunctionData, keccak256 } from "viem";
+import { ERC20_ABI } from "../src/trading/index.js";
 import {
   buildSimulationRequest,
   createSimulationEvidence,
@@ -198,6 +199,142 @@ describe("exact authorized trading lifecycle", () => {
     await expect(f.orchestrator.submit(x.id)).rejects.toThrow(
       /not approved|in progress/,
     );
+    f.store.close();
+  });
+  it("runs an allowance revoke through the full approval and signing pipeline", async () => {
+    const f = fixture(join(temp(), "trade.sqlite"));
+    const data = encodeFunctionData({
+      abi: ERC20_ABI,
+      functionName: "approve",
+      args: [router, 0n],
+    });
+    const tx = {
+      chainId: 46630,
+      from: account,
+      to: token,
+      data,
+      value: 0n,
+      gas: 60000n,
+      nonce: 7,
+      type: "eip1559" as const,
+      maxFeePerGas: 20n,
+      maxPriorityFeePerGas: 2n,
+      accessList: [],
+    };
+    const request = buildSimulationRequest(tx, "policy-hash");
+    const evidence = createSimulationEvidence(request, {
+      success: true,
+      blockNumber: 10n,
+      blockHash: `0x${"11".repeat(32)}`,
+      transactionHash: request.transactionHash,
+      gasUsed: 50000n,
+      stateDiffs: [],
+      events: [],
+      assetDeltas: [],
+    });
+    f.rpc.revokeQuote = vi.fn(async () => ({
+      amountOut: 0n,
+      blockNumber: 10n,
+      blockHash: `0x${"11".repeat(32)}` as `0x${string}`,
+      expiresAt: 20_000,
+      request,
+      evidence,
+    }));
+    vi.mocked(f.rpc.simulate).mockResolvedValue(evidence);
+    const x = await f.orchestrator.revoke(token, {
+      idempotencyKey: "revoke-1",
+      actor: "operator",
+      dryRun: false,
+    });
+    expect(x.state).toBe("awaiting-approval");
+    expect(f.rpc.revokeQuote).toHaveBeenCalledWith({
+      token,
+      spender: router,
+    });
+    expect(f.approvals.request).toHaveBeenCalledWith(
+      expect.objectContaining({
+        calldata: data,
+        router: token,
+        value: "0",
+        serializedTransaction: expect.objectContaining({
+          serialized: request.serialized,
+        }),
+      }),
+      expect.anything(),
+    );
+    const again = await f.orchestrator.revoke(token, {
+      idempotencyKey: "revoke-1",
+      actor: "operator",
+      dryRun: false,
+    });
+    expect(again.id).toBe(x.id);
+    await f.orchestrator.refreshApproval(x.id);
+    const sent = await f.orchestrator.submit(x.id);
+    expect(sent.state).toBe("broadcast");
+    expect(f.signer.sign).toHaveBeenCalledWith({
+      serialized: request.serialized,
+      envelope: f.envelope,
+      authorizationToken: "auth-1",
+    });
+    f.store.close();
+  });
+  it("defaults revokes to dry-run and fails closed without revoke support", async () => {
+    const f = fixture(join(temp(), "trade.sqlite"));
+    await expect(
+      f.orchestrator.revoke(token, { idempotencyKey: "r", actor: "operator" }),
+    ).rejects.toThrow("revoke_unsupported");
+    const data = encodeFunctionData({
+      abi: ERC20_ABI,
+      functionName: "approve",
+      args: [router, 0n],
+    });
+    const request = buildSimulationRequest(
+      {
+        chainId: 46630,
+        from: account,
+        to: token,
+        data,
+        value: 0n,
+        gas: 60000n,
+        nonce: 7,
+        type: "eip1559",
+        maxFeePerGas: 20n,
+        maxPriorityFeePerGas: 2n,
+        accessList: [],
+      },
+      "policy-hash",
+    );
+    const evidence = createSimulationEvidence(request, {
+      success: true,
+      blockNumber: 10n,
+      blockHash: `0x${"11".repeat(32)}`,
+      transactionHash: request.transactionHash,
+      gasUsed: 50000n,
+      stateDiffs: [],
+      events: [],
+      assetDeltas: [],
+    });
+    f.rpc.revokeQuote = vi.fn(async () => ({
+      amountOut: 0n,
+      blockNumber: 10n,
+      blockHash: `0x${"11".repeat(32)}` as `0x${string}`,
+      expiresAt: 20_000,
+      request,
+      evidence,
+    }));
+    vi.mocked(f.rpc.simulate).mockResolvedValue(evidence);
+    await expect(
+      f.orchestrator.revoke("not-an-address" as any, {
+        idempotencyKey: "bad",
+        actor: "operator",
+      }),
+    ).rejects.toThrow();
+    const dry = await f.orchestrator.revoke(token, {
+      idempotencyKey: "dry",
+      actor: "operator",
+    });
+    expect(dry.state).toBe("dry-run");
+    expect(dry.dryRun).toBe(true);
     f.store.close();
   });
   it("persists only the signed transaction hash in the API execution database", async () => {
