@@ -13,7 +13,7 @@ ARI OS gives an AI agent memory, tools, durable jobs, market intelligence, appro
 > [!IMPORTANT]
 > ARI OS supports funded Robinhood Chain mainnet execution through an isolated, policy-constrained signer. Live mode is triple-opt-in and is not safe by default: verify the build, audit policy and contract addresses, use a dedicated minimally funded wallet, and follow the [trading runbook](docs/TRADING.md). Passing tests is not a security audit.
 
-Production quick start: verify the clone, run `npm run setup:trading -- --account <address> --rpc <url>`, create the keystore with `npm run signer -- create`, then configure the signer, approval keys, API, and recovery loop exactly as described in the [trading runbook](docs/TRADING.md). Supported lifecycle commands include `trade quote`, `buy`/`sell`, `approve`/`deny`, `submit`, `status`, and `reconcile`; there is no CLI allowance-revoke command.
+Production quick start: verify the clone, run `npm run setup:trading -- --account <address> --rpc <url>`, create the keystore with `npm run signer -- create`, then configure the signer, approval keys, API, and recovery loop exactly as described in the [trading runbook](docs/TRADING.md). Supported lifecycle commands include `trade quote`, `buy`/`sell`, `revoke`, `approve`/`deny`, `submit`, `status`, and `reconcile`. Allowance revokes flow through the same exact-transaction approval and isolated-signer pipeline as swaps.
 
 ## Why ARI OS exists
 
@@ -174,6 +174,7 @@ The standalone server provides:
 | `GET /v1/runs/:id/events` | Resume run events over SSE | Scoped bearer token |
 | `POST /v1/trading/quote` | Quote and pin an exact simulated transaction | `trading:quote` |
 | `POST /v1/trading/execute` | Create an idempotent dry-run/live execution | `trading:execute` |
+| `POST /v1/trading/revoke` | Create an idempotent allowance-revoke execution | `trading:execute` |
 | `GET /v1/trading/executions/:id` | Read durable execution/approval state | `trading:read` |
 | `POST /v1/trading/executions/:id/approve` | Submit operator approval proof | `trading:approve` |
 | `POST /v1/trading/executions/:id/submit` | Authorize, sign, and broadcast | `trading:submit` |
@@ -257,14 +258,15 @@ Current acceptance baseline:
 
 ```text
 54 test suites
-392 tests
+400 tests
 3/3 live Robinhood RPC and deployed-bytecode checks
-Strict TypeScript build
+Strict TypeScript build, ESLint, and Prettier gates
+Green on Linux and Windows
 0 known production dependency vulnerabilities
 Clean npm tarball install verified
 ```
 
-The suite includes restart recovery, multi-connection SQLite races, stale-worker fencing, replay attempts, malformed RPC data, tenant isolation, forged approval proofs, exposure oversubscription, package installation, and real subprocess entrypoints.
+The suite includes restart recovery, multi-connection SQLite races, stale-worker fencing, replay attempts, malformed RPC data, tenant isolation, forged approval proofs, exposure oversubscription, allowance-revoke lifecycle and tamper cases, package installation, and real subprocess entrypoints. CI runs the full verify pipeline on Ubuntu and Windows for every push and pull request.
 
 ## Deployment
 

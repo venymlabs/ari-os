@@ -17,10 +17,10 @@ import { createNoxaTokenRegistry } from "../noxa.js";
 import {
   createPublicClient,
   custom,
+  encodeFunctionData,
+  getAddress,
   http,
-  keccak256,
   type Address,
-  type Hex,
 } from "viem";
 import { robinhoodMainnet, robinhoodTestnet } from "../chain.js";
 import {
@@ -31,11 +31,13 @@ import {
 } from "../live-trading/index.js";
 import { registerTradingTools } from "../live-trading/tools.js";
 import {
-  quoteExactInputSingle,
+  approvalIntent,
+  buildApprovalTransaction,
+  createRobinhoodTradingClient,
   quoteRoutesAtBlock,
   buildRoutedSwapIntent,
   buildSwapTransaction,
-  createRobinhoodTradingClient,
+  ERC20_ABI,
 } from "../trading/index.js";
 import { readFileSync } from "node:fs";
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
@@ -236,6 +238,61 @@ export function createTradingComposition(
         evidence,
       };
     },
+    revokeQuote: async ({ token, spender }) => {
+      const blockNumber = await client.getBlockNumber(),
+        block = await client.getBlock({ blockNumber });
+      const intent = approvalIntent({
+        chainId: config.rpc!.chainId,
+        owner: t.account,
+        token,
+        spender,
+        amount: 0n,
+      });
+      const nonce = await client.getTransactionCount({
+          address: t.account,
+          blockTag: "pending",
+        }),
+        probe = buildApprovalTransaction(intent, {
+          nonce,
+          gas: 1n,
+          gasPrice: 1n,
+        });
+      const [gas, fees] = await Promise.all([
+        client.estimateGas({
+          account: t.account,
+          to: token,
+          data: probe.transaction.data,
+          value: 0n,
+        }),
+        client.estimateFeesPerGas(),
+      ]);
+      const built = buildApprovalTransaction(intent, {
+        nonce,
+        gas,
+        ...(fees.gasPrice !== undefined
+          ? { gasPrice: fees.gasPrice }
+          : {
+              maxFeePerGas: fees.maxFeePerGas!,
+              maxPriorityFeePerGas: fees.maxPriorityFeePerGas!,
+            }),
+      });
+      const request = buildSimulationRequest(
+          { ...built.transaction, from: t.account },
+          policyHash,
+        ),
+        result = await simulator.simulate(request);
+      if (!result.success)
+        throw Error(`simulation failed: ${result.revertReason ?? "reverted"}`);
+      const evidence = createSimulationEvidence(request, result);
+      return {
+        amountOut: 0n,
+        blockNumber,
+        blockHash: block.hash,
+        expiresAt: Date.now() + 30_000,
+        request,
+        evidence,
+      };
+    },
     simulate: async (request) =>
       createSimulationEvidence(
         request as any,
@@ -267,6 +324,10 @@ export function createTradingComposition(
       : undefined;
     signer = new UnixSignerClient(t.signerSocketPath, token);
   }
+  // Revoke executions reserve no capital, but the authorization issuer
+  // still requires a reservation reference that was minted by this
+  // composition for the exact quote being submitted.
+  const revokeReservations = new Set<string>();
   let approvals: ApprovalEngine | undefined,
     authorization: AuthorizationIssuer | undefined,
     reservations: ReservationLedger | undefined,
@@ -361,6 +422,62 @@ export function createTradingComposition(
         try {
           let input: ProductionRiskInput;
           const wrapped = raw as any;
+          if (
+            wrapped?.quote?.side === "revoke" &&
+            wrapped?.request &&
+            wrapped?.evidence
+          ) {
+            // A revoke carries zero capital exposure, so the swap risk
+            // evaluator does not apply. It is still assessed: the pinned
+            // transaction must be exactly approve(router, 0) on the quoted
+            // token, at a canonical un-reorged block, before it can earn a
+            // risk hash the authorization issuer will accept.
+            const q = wrapped.quote,
+              tx = wrapped.request.transaction,
+              e = wrapped.evidence,
+              reasons: string[] = [];
+            const expectedData = encodeFunctionData({
+              abi: ERC20_ABI,
+              functionName: "approve",
+              args: [getAddress(t.router), 0n],
+            });
+            if (BigInt(tx.chainId) !== BigInt(config.rpc!.chainId))
+              reasons.push("chain_not_allowed");
+            if (getAddress(tx.from) !== getAddress(t.account))
+              reasons.push("account_not_allowed");
+            if (getAddress(tx.to) !== getAddress(q.tokenIn))
+              reasons.push("revoke_target_mismatch");
+            if (BigInt(tx.value) !== 0n) reasons.push("revoke_value_nonzero");
+            if (String(tx.data).toLowerCase() !== expectedData.toLowerCase())
+              reasons.push("revoke_calldata_mismatch");
+            if (q.expiresAt <= Date.now()) reasons.push("quote_stale");
+            const canonicalBlockHash = await rpc.blockHash(q.blockNumber);
+            if (
+              !canonicalBlockHash ||
+              String(q.blockHash ?? e.blockHash).toLowerCase() !==
+                canonicalBlockHash.toLowerCase()
+            )
+              reasons.push("quote_block_reorged");
+            const decision = { allowed: !reasons.length, reasons };
+            const hash = createHash("sha256")
+              .update("production-risk-v2\0")
+              .update(
+                canonicalRisk({
+                  input: {
+                    kind: "revoke",
+                    chain: BigInt(config.rpc!.chainId),
+                    account: t.account,
+                    token: q.tokenIn,
+                    spender: t.router,
+                    transactionHash: wrapped.request.transactionHash,
+                  },
+                  decision,
+                }),
+              )
+              .digest("hex");
+            if (decision.allowed) riskHashes.add(hash);
+            return { hash, ...decision };
+          }
           if (wrapped?.quote && wrapped?.request && wrapped?.evidence) {
             const q = wrapped.quote,
               tx = wrapped.request.transaction,
@@ -437,7 +554,8 @@ export function createTradingComposition(
         quote: async (hash) => !!store.findQuoteByHash(hash),
         policy: async (hash) => hash === policyHash,
         risk: async (hash) => riskHashes.has(hash),
-        reservation: async (id) => reservations!.has(id),
+        reservation: async (id) =>
+          reservations!.has(id) || revokeReservations.has(id),
         approval: async (id) => approvals!.get(id)?.status === "consumed",
         simulation: async (hash) => simulationHashes.has(hash),
         nonce: async (_chain, account) =>
@@ -459,29 +577,45 @@ export function createTradingComposition(
         reserve: async (x: any) => {
           const q = store.findQuoteByHash(x.quoteHash);
           if (!q) throw Error("reservation_quote_missing");
+          if (q.side === "revoke") {
+            const revokeId = createHash("sha256")
+              .update(
+                `revoke-reservation-v1\0${x.quoteHash}\0${x.transactionHash}`,
+              )
+              .digest("hex");
+            revokeReservations.add(revokeId);
+            return revokeId;
+          }
           const id = createHash("sha256")
             .update(`reservation-v1\0${x.quoteHash}\0${x.transactionHash}`)
             .digest("hex");
           if (
-            !reservations!.reserveWithin({
-              id,
-              at: BigInt(Math.floor(Date.now() / 1000)),
-              asset: q.tokenIn,
-              strategy: "live",
-              amount: q.amountIn,
-            }, {
-              // Native token units: this cap is evaluated and inserted under one
-              // BEGIN IMMEDIATE transaction. Aggregate exposure is disabled until
-              // the adapter has explicit normalized quote valuation evidence.
-              perAsset: riskEvaluator!.limits.maxReservedPerToken[q.tokenIn] ?? 0n,
-            })
+            !reservations!.reserveWithin(
+              {
+                id,
+                at: BigInt(Math.floor(Date.now() / 1000)),
+                asset: q.tokenIn,
+                strategy: "live",
+                amount: q.amountIn,
+              },
+              {
+                // Native token units: this cap is evaluated and inserted under one
+                // BEGIN IMMEDIATE transaction. Aggregate exposure is disabled until
+                // the adapter has explicit normalized quote valuation evidence.
+                perAsset:
+                  riskEvaluator!.limits.maxReservedPerToken[q.tokenIn] ?? 0n,
+              },
+            )
           )
             throw Error("reservation_failed");
           return id;
         },
-        valid: async (id: string) => reservations!.has(id),
-        commit: async (id: string) => reservations!.commit(id),
-        release: async (id: string) => reservations!.release(id),
+        valid: async (id: string) =>
+          revokeReservations.has(id) || reservations!.has(id),
+        commit: async (id: string) =>
+          revokeReservations.delete(id) || reservations!.commit(id),
+        release: async (id: string) =>
+          revokeReservations.delete(id) || reservations!.release(id),
       }
     : undefined;
   const trading = new TradingOrchestrator({
@@ -516,13 +650,27 @@ export function createTradingComposition(
       });
       if (signer) {
         let status;
-        try { status = await signer.status(); } catch { throw Error("signer_unavailable"); }
+        try {
+          status = await signer.status();
+        } catch {
+          throw Error("signer_unavailable");
+        }
         const expectedPolicyHash = `0x${createHash("sha256").update(readFileSync(t.signerPolicyPath!, "utf8")).digest("hex")}`;
-        if (status.account.toLowerCase() !== t.account.toLowerCase()) throw Error("signer_account_mismatch");
-        if (status.chainIds.length !== 1 || status.chainIds[0] !== config.rpc!.chainId) throw Error("signer_chain_ids_mismatch");
-        if (status.policyHash.toLowerCase() !== expectedPolicyHash.toLowerCase()) throw Error("signer_policy_hash_mismatch");
-        if (status.policyVersion !== policy.version) throw Error("signer_policy_version_mismatch");
-        if (status.authorizationKeyId !== t.authorizationKeyId) throw Error("signer_authorization_key_id_mismatch");
+        if (status.account.toLowerCase() !== t.account.toLowerCase())
+          throw Error("signer_account_mismatch");
+        if (
+          status.chainIds.length !== 1 ||
+          status.chainIds[0] !== config.rpc!.chainId
+        )
+          throw Error("signer_chain_ids_mismatch");
+        if (
+          status.policyHash.toLowerCase() !== expectedPolicyHash.toLowerCase()
+        )
+          throw Error("signer_policy_hash_mismatch");
+        if (status.policyVersion !== policy.version)
+          throw Error("signer_policy_version_mismatch");
+        if (status.authorizationKeyId !== t.authorizationKeyId)
+          throw Error("signer_authorization_key_id_mismatch");
       }
     },
     close() {

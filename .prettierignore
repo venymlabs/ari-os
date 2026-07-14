@@ -1,0 +1,6 @@
+dist
+node_modules
+package-lock.json
+# Deploy artifacts are asserted byte-for-byte by deployment tests.
+compose.yaml
+deploy

@@ -5,7 +5,12 @@ export const robinhoodMainnet = defineChain({
   name: "Robinhood Chain",
   nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
   rpcUrls: { default: { http: ["https://rpc.mainnet.chain.robinhood.com"] } },
-  blockExplorers: { default: { name: "Robinhood Chain Explorer", url: "https://robinhoodchain.blockscout.com" } },
+  blockExplorers: {
+    default: {
+      name: "Robinhood Chain Explorer",
+      url: "https://robinhoodchain.blockscout.com",
+    },
+  },
 });
 
 export const robinhoodTestnet = defineChain({
@@ -13,7 +18,12 @@ export const robinhoodTestnet = defineChain({
   name: "Robinhood Chain Testnet",
   nativeCurrency: { name: "Test Ether", symbol: "ETH", decimals: 18 },
   rpcUrls: { default: { http: ["https://rpc.testnet.chain.robinhood.com"] } },
-  blockExplorers: { default: { name: "Robinhood Chain Testnet Explorer", url: "https://explorer.testnet.chain.robinhood.com" } },
+  blockExplorers: {
+    default: {
+      name: "Robinhood Chain Testnet Explorer",
+      url: "https://explorer.testnet.chain.robinhood.com",
+    },
+  },
   testnet: true,
 });
 

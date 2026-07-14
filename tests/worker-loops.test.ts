@@ -1,2 +1,39 @@
-import {describe,it,expect} from 'vitest';import {z} from 'zod';import {JobQueue} from '../src/autonomy/jobs/index.js';import {JobWorker,JobHandlerRegistry,DurableScheduler} from '../src/workers/jobs.js';
-describe('autonomous loops',()=>{it('worker executes registered jobs and drains',async()=>{const q=new JobQueue(':memory:');q.register('x',z.object({n:z.number()}));q.enqueue('x',{n:1});const r=new JobHandlerRegistry().register('x',z.object({n:z.number()}),async p=>`result://${p.n}`);const w=new JobWorker(q,r,{workerId:'w',leaseMs:100,pollMs:1});await w.runOnce();expect(q.get(q.claim('probe',1)?.job.id??'')?.status).not.toBe('running');await w.stop();q.close()});it('scheduler persists definitions and fires idempotently',()=>{let now=100;const q=new JobQueue(':memory:',{clock:()=>now});q.register('x',z.any());const s=new DurableScheduler(':memory:',q,{clock:()=>now});s.upsert('s','x',{}, {everyMs:10});now=110;expect(s.tick()).toBe(1);expect(s.tick()).toBe(0);s.close();q.close()})});
+import { describe, it, expect } from "vitest";
+import { z } from "zod";
+import { JobQueue } from "../src/autonomy/jobs/index.js";
+import {
+  JobWorker,
+  JobHandlerRegistry,
+  DurableScheduler,
+} from "../src/workers/jobs.js";
+describe("autonomous loops", () => {
+  it("worker executes registered jobs and drains", async () => {
+    const q = new JobQueue(":memory:");
+    q.register("x", z.object({ n: z.number() }));
+    q.enqueue("x", { n: 1 });
+    const r = new JobHandlerRegistry().register(
+      "x",
+      z.object({ n: z.number() }),
+      async (p) => `result://${p.n}`,
+    );
+    const w = new JobWorker(q, r, { workerId: "w", leaseMs: 100, pollMs: 1 });
+    await w.runOnce();
+    expect(q.get(q.claim("probe", 1)?.job.id ?? "")?.status).not.toBe(
+      "running",
+    );
+    await w.stop();
+    q.close();
+  });
+  it("scheduler persists definitions and fires idempotently", () => {
+    let now = 100;
+    const q = new JobQueue(":memory:", { clock: () => now });
+    q.register("x", z.any());
+    const s = new DurableScheduler(":memory:", q, { clock: () => now });
+    s.upsert("s", "x", {}, { everyMs: 10 });
+    now = 110;
+    expect(s.tick()).toBe(1);
+    expect(s.tick()).toBe(0);
+    s.close();
+    q.close();
+  });
+});

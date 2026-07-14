@@ -1,22 +1,20 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   ExecutionStore,
   TradingOrchestrator,
-  UnixSignerClient,
   type TradingRpc,
 } from "../src/live-trading/index.js";
+import { removeDir } from "./helpers.js";
 const dirs: string[] = [];
 const temp = () => {
   const d = mkdtempSync(join(tmpdir(), "trade-"));
   dirs.push(d);
   return d;
 };
-afterEach(() =>
-  dirs.splice(0).forEach((x) => rmSync(x, { recursive: true, force: true })),
-);
+afterEach(() => dirs.splice(0).forEach((x) => removeDir(x)));
 const A = "0x0000000000000000000000000000000000000001" as const,
   T = "0x0000000000000000000000000000000000000002" as const;
 function rpc(): TradingRpc {
@@ -96,11 +94,13 @@ describe("live trading orchestration", () => {
       amountIn: 10n,
       slippageBps: 50,
     });
-    await expect(o.execute(q.id, {
-      idempotencyKey: "k",
-      actor: "agent",
-      dryRun: false,
-    })).rejects.toThrow("exact_transaction_required");
+    await expect(
+      o.execute(q.id, {
+        idempotencyKey: "k",
+        actor: "agent",
+        dryRun: false,
+      }),
+    ).rejects.toThrow("exact_transaction_required");
     expect(signer.sign).not.toHaveBeenCalled();
     expect(r.broadcast).not.toHaveBeenCalled();
     store.close();
@@ -147,6 +147,45 @@ describe("live trading orchestration", () => {
     expect((await o.reconcile(id)).state).toBe("finalized");
     vi.mocked(r.blockHash).mockResolvedValue("0xbbb");
     expect((await o.reconcile(id)).state).toBe("reconciliation-required");
+    store.close();
+  });
+  it("migrates legacy execution databases to indexed columns in place", async () => {
+    const path = join(temp(), "legacy.sqlite");
+    const { DatabaseSync } = await import("node:sqlite");
+    const raw = new DatabaseSync(path);
+    raw.exec(
+      "CREATE TABLE executions(id TEXT PRIMARY KEY,idempotency_key TEXT UNIQUE NOT NULL,payload TEXT NOT NULL);CREATE TABLE quotes(id TEXT PRIMARY KEY,payload TEXT NOT NULL)",
+    );
+    raw.prepare("INSERT INTO executions VALUES(?,?,?)").run(
+      "e1",
+      "k1",
+      JSON.stringify({
+        id: "e1",
+        version: 0,
+        quoteId: "q1",
+        intentHash: "i",
+        actor: "a",
+        dryRun: false,
+        idempotencyKey: "k1",
+        state: "broadcast",
+        createdAt: 1,
+        updatedAt: 1,
+      }),
+    );
+    raw
+      .prepare("INSERT INTO quotes VALUES(?,?)")
+      .run(
+        "q1",
+        JSON.stringify({ id: "q1", quoteHash: "qh-1", intentHash: "i" }),
+      );
+    raw.close();
+    const store = new ExecutionStore(path);
+    expect(store.findQuoteByHash("qh-1")?.id).toBe("q1");
+    expect(store.list(["broadcast"]).map((x) => x.id)).toEqual(["e1"]);
+    const moved = store.transition("e1", "broadcast", { state: "confirmed" });
+    expect(moved.state).toBe("confirmed");
+    expect(store.list(["broadcast"])).toEqual([]);
+    expect(store.list(["confirmed"]).map((x) => x.id)).toEqual(["e1"]);
     store.close();
   });
   it("rejects policy violations and arbitrary transaction fields", async () => {

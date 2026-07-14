@@ -1,10 +1,97 @@
-import {describe,expect,it,vi} from "vitest";
-import {parseCommand,runCli,type CliServices} from "../src/cli/index.js";
-const services:CliServices={chat:vi.fn(async(x)=>({reply:x.message})),status:vi.fn(()=>({ok:true})),sessions:vi.fn(()=>[]),tools:vi.fn(()=>["quote"]),skills:vi.fn(()=>["risk"]),markets:vi.fn(()=>["ETH"]),simulate:vi.fn(x=>({safe:true,input:x})),jobs:vi.fn(()=>[]),user:vi.fn(x=>x)};
-describe("CLI",()=>{
- it("parses supported commands and options",()=>{expect(parseCommand(["chat","hello","world","--session","s1"])).toEqual({name:"chat",message:"hello world",sessionId:"s1"});expect(parseCommand(["status"])).toEqual({name:"status"});expect(()=>parseCommand(["nope"])).toThrow("Unknown command")});
- it.each(["status","sessions","tools","skills","markets","jobs"] as const)("dispatches %s with JSON output",async(name)=>{const write=vi.fn();const code=await runCli([name],services,write);expect(code).toBe(0);expect(()=>JSON.parse(write.mock.calls[0]![0])).not.toThrow();expect(services[name]).toHaveBeenCalled()});
- it("injects chat and simulation services",async()=>{const out:string[]=[];await runCli(["chat","hi","--session","x"],services,x=>out.push(x));expect(services.chat).toHaveBeenCalledWith({message:"hi",sessionId:"x"});await runCli(["simulate","{\"amount\":1}"],services,x=>out.push(x));expect(services.simulate).toHaveBeenCalledWith({amount:1})});
- it("returns structured errors without leaking secrets",async()=>{const write=vi.fn();const bad={...services,status:()=>{throw new Error("failed token=abc")}};expect(await runCli(["status"],bad,write)).toBe(1);expect(write.mock.calls[0]![0]).not.toContain("abc")});
- it("parses and dispatches clone-to-trade commands",async()=>{expect(parseCommand(["setup","--force"])).toEqual({name:"user",group:"setup",action:"init",args:{force:true}});expect(parseCommand(["wallet","address"])).toEqual({name:"user",group:"wallet",action:"address",args:{}});expect(parseCommand(["trade","buy","--token","0xabc","--amount","12","--idempotency-key","once"])).toEqual({name:"user",group:"trade",action:"buy",args:{token:"0xabc",amount:"12",idempotencyKey:"once"}});const write=vi.fn();await runCli(["portfolio"],services,write);expect(services.user).toHaveBeenCalledWith({group:"portfolio",action:"show",args:{}})});
+import { describe, expect, it, vi } from "vitest";
+import { parseCommand, runCli, type CliServices } from "../src/cli/index.js";
+const services: CliServices = {
+  chat: vi.fn(async (x) => ({ reply: x.message })),
+  status: vi.fn(() => ({ ok: true })),
+  sessions: vi.fn(() => []),
+  tools: vi.fn(() => ["quote"]),
+  skills: vi.fn(() => ["risk"]),
+  markets: vi.fn(() => ["ETH"]),
+  simulate: vi.fn((x) => ({ safe: true, input: x })),
+  jobs: vi.fn(() => []),
+  user: vi.fn((x) => x),
+};
+describe("CLI", () => {
+  it("parses supported commands and options", () => {
+    expect(parseCommand(["chat", "hello", "world", "--session", "s1"])).toEqual(
+      { name: "chat", message: "hello world", sessionId: "s1" },
+    );
+    expect(parseCommand(["status"])).toEqual({ name: "status" });
+    expect(() => parseCommand(["nope"])).toThrow("Unknown command");
+  });
+  it.each([
+    "status",
+    "sessions",
+    "tools",
+    "skills",
+    "markets",
+    "jobs",
+  ] as const)("dispatches %s with JSON output", async (name) => {
+    const write = vi.fn();
+    const code = await runCli([name], services, write);
+    expect(code).toBe(0);
+    expect(() => JSON.parse(write.mock.calls[0]![0])).not.toThrow();
+    expect(services[name]).toHaveBeenCalled();
+  });
+  it("injects chat and simulation services", async () => {
+    const out: string[] = [];
+    await runCli(["chat", "hi", "--session", "x"], services, (x) =>
+      out.push(x),
+    );
+    expect(services.chat).toHaveBeenCalledWith({
+      message: "hi",
+      sessionId: "x",
+    });
+    await runCli(["simulate", '{"amount":1}'], services, (x) => out.push(x));
+    expect(services.simulate).toHaveBeenCalledWith({ amount: 1 });
+  });
+  it("returns structured errors without leaking secrets", async () => {
+    const write = vi.fn();
+    const bad = {
+      ...services,
+      status: () => {
+        throw new Error("failed token=abc");
+      },
+    };
+    expect(await runCli(["status"], bad, write)).toBe(1);
+    expect(write.mock.calls[0]![0]).not.toContain("abc");
+  });
+  it("parses and dispatches clone-to-trade commands", async () => {
+    expect(parseCommand(["setup", "--force"])).toEqual({
+      name: "user",
+      group: "setup",
+      action: "init",
+      args: { force: true },
+    });
+    expect(parseCommand(["wallet", "address"])).toEqual({
+      name: "user",
+      group: "wallet",
+      action: "address",
+      args: {},
+    });
+    expect(
+      parseCommand([
+        "trade",
+        "buy",
+        "--token",
+        "0xabc",
+        "--amount",
+        "12",
+        "--idempotency-key",
+        "once",
+      ]),
+    ).toEqual({
+      name: "user",
+      group: "trade",
+      action: "buy",
+      args: { token: "0xabc", amount: "12", idempotencyKey: "once" },
+    });
+    const write = vi.fn();
+    await runCli(["portfolio"], services, write);
+    expect(services.user).toHaveBeenCalledWith({
+      group: "portfolio",
+      action: "show",
+      args: {},
+    });
+  });
 });

@@ -5,6 +5,7 @@ import { createHash, timingSafeEqual, randomUUID } from "node:crypto";
 import { readdir } from "node:fs/promises";
 import { DatabaseSync } from "node:sqlite";
 import { loadConfig, type AppConfig } from "./config/index.js";
+import type { ModelProvider } from "./agent/runtime/index.js";
 import { createApplication } from "./app/index.js";
 import { SessionStore } from "./storage/session-store.js";
 import { TRADING_CAPABILITIES } from "./agent/types.js";
@@ -25,12 +26,10 @@ export function createServer(o: ServerOptions): FastifyInstance {
   app.get("/livez", async () => ({ status: "ok" }));
   app.get("/readyz", async (_q, r) => {
     const ready = await o.ready();
-    return r
-      .code(ready ? 200 : 503)
-      .send({
-        status: ready ? "ready" : "not-ready",
-        dependencies: await o.health(),
-      });
+    return r.code(ready ? 200 : 503).send({
+      status: ready ? "ready" : "not-ready",
+      dependencies: await o.health(),
+    });
   });
   app.get("/metrics", async (_q, r) =>
     r.type("text/plain").send(`raos_ready ${(await o.ready()) ? 1 : 0}\n`),
@@ -55,18 +54,16 @@ export function createServer(o: ServerOptions): FastifyInstance {
   if (o.resources?.sessions)
     app.get("/v1/sessions", async (q, r) => {
       if (o.apiToken && q.headers.authorization !== `Bearer ${o.apiToken}`)
-        return r
-          .code(401)
-          .send({
-            error: { code: "UNAUTHORIZED", message: "Authentication required" },
-          });
+        return r.code(401).send({
+          error: { code: "UNAUTHORIZED", message: "Authentication required" },
+        });
       return o.resources!.sessions!();
     });
   return app;
 }
 export async function createStandaloneServer(
   config: AppConfig,
-  overrides: { rpcFetch?: typeof fetch } = {},
+  overrides: { rpcFetch?: typeof fetch; modelProvider?: ModelProvider } = {},
 ) {
   const application = createApplication(config, overrides);
   await application.start();
@@ -99,11 +96,9 @@ export async function createStandaloneServer(
             .code(403)
             .send({ error: { code: "FORBIDDEN", message: "Missing scope" } }),
           false)
-      : (r
-          .code(401)
-          .send({
-            error: { code: "UNAUTHORIZED", message: "Authentication required" },
-          }),
+      : (r.code(401).send({
+          error: { code: "UNAUTHORIZED", message: "Authentication required" },
+        }),
         false);
   if (application.trading)
     registerTradingApi(app, {
@@ -130,14 +125,12 @@ export async function createStandaloneServer(
     if (!guard(q, r, "tool:invoke")) return;
     const name = String(q.params.name);
     if (!name.startsWith("market."))
-      return r
-        .code(403)
-        .send({
-          error: {
-            code: "CAPABILITY_DENIED",
-            message: "Only market tools may be invoked",
-          },
-        });
+      return r.code(403).send({
+        error: {
+          code: "CAPABILITY_DENIED",
+          message: "Only market tools may be invoked",
+        },
+      });
     const result = await application.registry.invoke(name, q.body ?? {}, {
       capabilities: [TRADING_CAPABILITIES.MARKET_DATA],
       invocationId: randomUUID(),
@@ -235,12 +228,27 @@ export async function createStandaloneServer(
       key || undefined,
     );
     queueMicrotask(async () => {
-      application.runs.emit(run.id, "run.started", {});
-      for await (const e of application.runtime.run({
-        messages: [{ role: "user", content: b.input! }],
-      }))
-        application.runs.emit(run.id, e.type, e);
-      application.runs.setStatus(run.id, "failed");
+      // The runtime reports its outcome as a terminal event; a run that
+      // ends without one (or throws) is treated as failed.
+      let status: "completed" | "failed" | "cancelled" = "failed";
+      try {
+        application.runs.emit(run.id, "run.started", {});
+        for await (const e of application.runtime.run({
+          messages: [{ role: "user", content: b.input! }],
+        })) {
+          application.runs.emit(run.id, e.type, e);
+          if (e.type === "run.completed") status = "completed";
+          else if (e.type === "run.cancelled") status = "cancelled";
+          else if (e.type === "run.failed") status = "failed";
+        }
+      } catch {
+        status = "failed";
+      }
+      try {
+        application.runs.setStatus(run.id, status);
+      } catch {
+        // The store may already be closed during shutdown.
+      }
     });
     return r.code(202).send(pub(run));
   });
