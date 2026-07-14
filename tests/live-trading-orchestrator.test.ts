@@ -5,7 +5,6 @@ import { join } from "node:path";
 import {
   ExecutionStore,
   TradingOrchestrator,
-  UnixSignerClient,
   type TradingRpc,
 } from "../src/live-trading/index.js";
 const dirs: string[] = [];
@@ -96,11 +95,13 @@ describe("live trading orchestration", () => {
       amountIn: 10n,
       slippageBps: 50,
     });
-    await expect(o.execute(q.id, {
-      idempotencyKey: "k",
-      actor: "agent",
-      dryRun: false,
-    })).rejects.toThrow("exact_transaction_required");
+    await expect(
+      o.execute(q.id, {
+        idempotencyKey: "k",
+        actor: "agent",
+        dryRun: false,
+      }),
+    ).rejects.toThrow("exact_transaction_required");
     expect(signer.sign).not.toHaveBeenCalled();
     expect(r.broadcast).not.toHaveBeenCalled();
     store.close();

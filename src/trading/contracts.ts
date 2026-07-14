@@ -14,11 +14,14 @@ export const tradingContracts = Object.freeze({
     }),
     uniswapV3: Object.freeze({
       factory: "0x1f7d7550b1b028f7571e69a784071f0205fd2efa" as Address,
-      interfaceMulticall: "0x282a3c4d320cc7f0d5eaf56b8029e4b88338f0a3" as Address,
+      interfaceMulticall:
+        "0x282a3c4d320cc7f0d5eaf56b8029e4b88338f0a3" as Address,
       tickLens: "0x7dfd4f31be6814d2906bde155c3e1b146eac1468" as Address,
       quoterV2: "0x33e885ed0ec9bf04ecfb19341582aadcb4c8a9e7" as Address,
-      nonfungiblePositionManager: "0x73991a25c818bf1f1128deaab1492d45638de0d3" as Address,
-      nonfungibleTokenPositionDescriptor: "0x6f84dae9c064ff453e5c8af51efb819f8f610225" as Address,
+      nonfungiblePositionManager:
+        "0x73991a25c818bf1f1128deaab1492d45638de0d3" as Address,
+      nonfungibleTokenPositionDescriptor:
+        "0x6f84dae9c064ff453e5c8af51efb819f8f610225" as Address,
       nftDescriptor: "0x2e9d45bb7b30549f5216813ada9a6b7982c5b3ed" as Address,
       swapRouter02: "0xcaf681a66d020601342297493863e78c959e5cb2" as Address,
       permit2: "0x000000000022D473030F116dDEE9F6B43aC78BA3" as Address,

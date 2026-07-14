@@ -63,7 +63,12 @@ const schema = z
       .max(10000)
       .default(100),
     TRADING_FINALITY_BLOCKS: z.coerce.number().int().positive().default(12),
-    TRADING_RECONCILE_INTERVAL_MS: z.coerce.number().int().positive().max(3600000).default(15000),
+    TRADING_RECONCILE_INTERVAL_MS: z.coerce
+      .number()
+      .int()
+      .positive()
+      .max(3600000)
+      .default(15000),
   })
   .passthrough();
 export interface TradingConfig {
@@ -208,11 +213,25 @@ export function loadConfig(
       }
       if (!e.SIGNER_SOCKET_PATH || !isAbsolute(e.SIGNER_SOCKET_PATH))
         throw Error("SIGNER_SOCKET_PATH must be absolute");
-      for (const n of ["APPROVAL_OPERATOR_IDS","APPROVAL_OPERATOR_KEY_IDS","APPROVAL_OPERATOR_KEY_PATHS","AUTHORIZATION_KEY_ID","AUTHORIZATION_KEY_PATH"] as const)
+      for (const n of [
+        "APPROVAL_OPERATOR_IDS",
+        "APPROVAL_OPERATOR_KEY_IDS",
+        "APPROVAL_OPERATOR_KEY_PATHS",
+        "AUTHORIZATION_KEY_ID",
+        "AUTHORIZATION_KEY_PATH",
+      ] as const)
         if (!e[n]) throw Error(`${n} is required`);
-      const ids=e.APPROVAL_OPERATOR_IDS!.split(","), keyIds=e.APPROVAL_OPERATOR_KEY_IDS!.split(","), keyPaths=e.APPROVAL_OPERATOR_KEY_PATHS!.split(",");
-      if (ids.length!==keyIds.length || ids.length!==keyPaths.length || ids.some((id,i)=>!id||!keyIds[i]||!keyPaths[i])) throw Error("approval operator configuration mismatch");
-      for (const p of [...keyPaths,e.AUTHORIZATION_KEY_PATH!]) privateFile(p,"approval/authorization key");
+      const ids = e.APPROVAL_OPERATOR_IDS!.split(","),
+        keyIds = e.APPROVAL_OPERATOR_KEY_IDS!.split(","),
+        keyPaths = e.APPROVAL_OPERATOR_KEY_PATHS!.split(",");
+      if (
+        ids.length !== keyIds.length ||
+        ids.length !== keyPaths.length ||
+        ids.some((id, i) => !id || !keyIds[i] || !keyPaths[i])
+      )
+        throw Error("approval operator configuration mismatch");
+      for (const p of [...keyPaths, e.AUTHORIZATION_KEY_PATH!])
+        privateFile(p, "approval/authorization key");
     }
     if (!e.RPC_URL) throw Error("RPC_URL is required");
     trading = {
@@ -235,7 +254,20 @@ export function loadConfig(
       finalityBlocks: e.TRADING_FINALITY_BLOCKS,
       reconcileIntervalMs: e.TRADING_RECONCILE_INTERVAL_MS,
       liveEnabled: e.EXECUTION_MODE === "live",
-      ...(e.APPROVAL_OPERATOR_IDS ? {approvalOperators:e.APPROVAL_OPERATOR_IDS.split(",").map((id,i)=>({id,keyId:e.APPROVAL_OPERATOR_KEY_IDS!.split(",")[i]!,keyPath:e.APPROVAL_OPERATOR_KEY_PATHS!.split(",")[i]!})),approvalOperatorConfigVersion:e.APPROVAL_OPERATOR_CONFIG_VERSION,authorizationKeyId:e.AUTHORIZATION_KEY_ID!,authorizationKeyPath:e.AUTHORIZATION_KEY_PATH!} : {}),
+      ...(e.APPROVAL_OPERATOR_IDS
+        ? {
+            approvalOperators: e.APPROVAL_OPERATOR_IDS.split(",").map(
+              (id, i) => ({
+                id,
+                keyId: e.APPROVAL_OPERATOR_KEY_IDS!.split(",")[i]!,
+                keyPath: e.APPROVAL_OPERATOR_KEY_PATHS!.split(",")[i]!,
+              }),
+            ),
+            approvalOperatorConfigVersion: e.APPROVAL_OPERATOR_CONFIG_VERSION,
+            authorizationKeyId: e.AUTHORIZATION_KEY_ID!,
+            authorizationKeyPath: e.AUTHORIZATION_KEY_PATH!,
+          }
+        : {}),
     };
   }
   if (requirements.requireRpc && !e.RPC_URL) throw Error("RPC_URL is required");

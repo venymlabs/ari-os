@@ -27,10 +27,12 @@
     "test:unit": "vitest run --exclude tests/*.integration.test.ts",
     "test:integration": "vitest run tests/*.integration.test.ts",
     "test:smoke": "npm run smoke:composition",
-    "lint": "npm run typecheck",
+    "lint": "eslint src tests && npm run typecheck",
+    "format": "prettier --write \"src/**/*.ts\" \"tests/**/*.ts\" \"*.json\"",
+    "format:check": "prettier --check \"src/**/*.ts\" \"tests/**/*.ts\" \"*.json\"",
     "typecheck": "tsc --noEmit",
     "build": "npm run clean && tsc -p tsconfig.build.json",
-    "verify": "npm run build && npm run test && npm run typecheck",
+    "verify": "npm run build && npm run test && npm run lint && npm run format:check",
     "prepublishOnly": "npm run verify",
     "config:check": "node dist/bin/maintenance.js config",
     "db:migrate": "node dist/bin/maintenance.js db:migrate",
@@ -58,18 +60,32 @@
     "zod-to-json-schema": "^3.25.2"
   },
   "devDependencies": {
+    "@eslint/js": "10.0.1",
     "@types/node": "^22.15.0",
+    "eslint": "10.7.0",
+    "prettier": "3.9.5",
     "typescript": "^5.8.3",
+    "typescript-eslint": "8.64.0",
     "vitest": "^3.2.4"
   },
   "engines": {
     "node": ">=22"
   },
-  "main": "index.js",
-  "directories": {
-    "doc": "docs",
-    "test": "tests"
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/venymlabs/ari-os.git"
   },
-  "keywords": [],
-  "author": ""
+  "homepage": "https://github.com/venymlabs/ari-os#readme",
+  "bugs": {
+    "url": "https://github.com/venymlabs/ari-os/issues"
+  },
+  "keywords": [
+    "agent",
+    "trading",
+    "robinhood-chain",
+    "evm",
+    "signer",
+    "autonomous"
+  ],
+  "author": "Venym Labs"
 }

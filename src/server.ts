@@ -25,12 +25,10 @@ export function createServer(o: ServerOptions): FastifyInstance {
   app.get("/livez", async () => ({ status: "ok" }));
   app.get("/readyz", async (_q, r) => {
     const ready = await o.ready();
-    return r
-      .code(ready ? 200 : 503)
-      .send({
-        status: ready ? "ready" : "not-ready",
-        dependencies: await o.health(),
-      });
+    return r.code(ready ? 200 : 503).send({
+      status: ready ? "ready" : "not-ready",
+      dependencies: await o.health(),
+    });
   });
   app.get("/metrics", async (_q, r) =>
     r.type("text/plain").send(`raos_ready ${(await o.ready()) ? 1 : 0}\n`),
@@ -55,11 +53,9 @@ export function createServer(o: ServerOptions): FastifyInstance {
   if (o.resources?.sessions)
     app.get("/v1/sessions", async (q, r) => {
       if (o.apiToken && q.headers.authorization !== `Bearer ${o.apiToken}`)
-        return r
-          .code(401)
-          .send({
-            error: { code: "UNAUTHORIZED", message: "Authentication required" },
-          });
+        return r.code(401).send({
+          error: { code: "UNAUTHORIZED", message: "Authentication required" },
+        });
       return o.resources!.sessions!();
     });
   return app;
@@ -99,11 +95,9 @@ export async function createStandaloneServer(
             .code(403)
             .send({ error: { code: "FORBIDDEN", message: "Missing scope" } }),
           false)
-      : (r
-          .code(401)
-          .send({
-            error: { code: "UNAUTHORIZED", message: "Authentication required" },
-          }),
+      : (r.code(401).send({
+          error: { code: "UNAUTHORIZED", message: "Authentication required" },
+        }),
         false);
   if (application.trading)
     registerTradingApi(app, {
@@ -130,14 +124,12 @@ export async function createStandaloneServer(
     if (!guard(q, r, "tool:invoke")) return;
     const name = String(q.params.name);
     if (!name.startsWith("market."))
-      return r
-        .code(403)
-        .send({
-          error: {
-            code: "CAPABILITY_DENIED",
-            message: "Only market tools may be invoked",
-          },
-        });
+      return r.code(403).send({
+        error: {
+          code: "CAPABILITY_DENIED",
+          message: "Only market tools may be invoked",
+        },
+      });
     const result = await application.registry.invoke(name, q.body ?? {}, {
       capabilities: [TRADING_CAPABILITIES.MARKET_DATA],
       invocationId: randomUUID(),

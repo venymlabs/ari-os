@@ -14,14 +14,7 @@ import { RegistryDispatcher } from "./adapters.js";
 import { RpcSimulator } from "../execution/rpc-simulator.js";
 import { NoxaIndexStore } from "../storage/noxa-index.js";
 import { createNoxaTokenRegistry } from "../noxa.js";
-import {
-  createPublicClient,
-  custom,
-  http,
-  keccak256,
-  type Address,
-  type Hex,
-} from "viem";
+import { createPublicClient, custom, http, type Address } from "viem";
 import { robinhoodMainnet, robinhoodTestnet } from "../chain.js";
 import {
   ExecutionStore,
@@ -31,7 +24,6 @@ import {
 } from "../live-trading/index.js";
 import { registerTradingTools } from "../live-trading/tools.js";
 import {
-  quoteExactInputSingle,
   quoteRoutesAtBlock,
   buildRoutedSwapIntent,
   buildSwapTransaction,
@@ -463,18 +455,22 @@ export function createTradingComposition(
             .update(`reservation-v1\0${x.quoteHash}\0${x.transactionHash}`)
             .digest("hex");
           if (
-            !reservations!.reserveWithin({
-              id,
-              at: BigInt(Math.floor(Date.now() / 1000)),
-              asset: q.tokenIn,
-              strategy: "live",
-              amount: q.amountIn,
-            }, {
-              // Native token units: this cap is evaluated and inserted under one
-              // BEGIN IMMEDIATE transaction. Aggregate exposure is disabled until
-              // the adapter has explicit normalized quote valuation evidence.
-              perAsset: riskEvaluator!.limits.maxReservedPerToken[q.tokenIn] ?? 0n,
-            })
+            !reservations!.reserveWithin(
+              {
+                id,
+                at: BigInt(Math.floor(Date.now() / 1000)),
+                asset: q.tokenIn,
+                strategy: "live",
+                amount: q.amountIn,
+              },
+              {
+                // Native token units: this cap is evaluated and inserted under one
+                // BEGIN IMMEDIATE transaction. Aggregate exposure is disabled until
+                // the adapter has explicit normalized quote valuation evidence.
+                perAsset:
+                  riskEvaluator!.limits.maxReservedPerToken[q.tokenIn] ?? 0n,
+              },
+            )
           )
             throw Error("reservation_failed");
           return id;
@@ -516,13 +512,27 @@ export function createTradingComposition(
       });
       if (signer) {
         let status;
-        try { status = await signer.status(); } catch { throw Error("signer_unavailable"); }
+        try {
+          status = await signer.status();
+        } catch {
+          throw Error("signer_unavailable");
+        }
         const expectedPolicyHash = `0x${createHash("sha256").update(readFileSync(t.signerPolicyPath!, "utf8")).digest("hex")}`;
-        if (status.account.toLowerCase() !== t.account.toLowerCase()) throw Error("signer_account_mismatch");
-        if (status.chainIds.length !== 1 || status.chainIds[0] !== config.rpc!.chainId) throw Error("signer_chain_ids_mismatch");
-        if (status.policyHash.toLowerCase() !== expectedPolicyHash.toLowerCase()) throw Error("signer_policy_hash_mismatch");
-        if (status.policyVersion !== policy.version) throw Error("signer_policy_version_mismatch");
-        if (status.authorizationKeyId !== t.authorizationKeyId) throw Error("signer_authorization_key_id_mismatch");
+        if (status.account.toLowerCase() !== t.account.toLowerCase())
+          throw Error("signer_account_mismatch");
+        if (
+          status.chainIds.length !== 1 ||
+          status.chainIds[0] !== config.rpc!.chainId
+        )
+          throw Error("signer_chain_ids_mismatch");
+        if (
+          status.policyHash.toLowerCase() !== expectedPolicyHash.toLowerCase()
+        )
+          throw Error("signer_policy_hash_mismatch");
+        if (status.policyVersion !== policy.version)
+          throw Error("signer_policy_version_mismatch");
+        if (status.authorizationKeyId !== t.authorizationKeyId)
+          throw Error("signer_authorization_key_id_mismatch");
       }
     },
     close() {

@@ -1,18 +1,206 @@
-import {afterEach,describe,expect,it,vi} from 'vitest';
-import {mkdtempSync,rmSync} from 'node:fs';
-import {tmpdir} from 'node:os';
-import {join} from 'node:path';
-import {generatePrivateKey,privateKeyToAccount} from 'viem/accounts';
-import {keccak256,serializeTransaction} from 'viem';
-import {SqliteReplayStore,SignerService,type SignPolicy} from '../src/signer/index.js';
-import {buildSimulationRequest,createSimulationEvidence} from '../src/execution/simulation.js';
-import {ExecutionStore,TradingOrchestrator,type TradingRpc} from '../src/live-trading/index.js';
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
+import { keccak256, serializeTransaction } from "viem";
+import {
+  SqliteReplayStore,
+  SignerService,
+  type SignPolicy,
+} from "../src/signer/index.js";
+import {
+  buildSimulationRequest,
+  createSimulationEvidence,
+} from "../src/execution/simulation.js";
+import {
+  ExecutionStore,
+  TradingOrchestrator,
+  type TradingRpc,
+} from "../src/live-trading/index.js";
 
-const dirs:string[]=[];const temp=()=>{const d=mkdtempSync(join(tmpdir(),'durable-sign-'));dirs.push(d);return d};afterEach(()=>dirs.splice(0).forEach(d=>rmSync(d,{recursive:true,force:true})));
-const account='0x0000000000000000000000000000000000000001' as const,router='0x0000000000000000000000000000000000000002' as const,token='0x0000000000000000000000000000000000000003' as const;
+const dirs: string[] = [];
+const temp = () => {
+  const d = mkdtempSync(join(tmpdir(), "durable-sign-"));
+  dirs.push(d);
+  return d;
+};
+afterEach(() =>
+  dirs.splice(0).forEach((d) => rmSync(d, { recursive: true, force: true })),
+);
+const account = "0x0000000000000000000000000000000000000001" as const,
+  router = "0x0000000000000000000000000000000000000002" as const,
+  token = "0x0000000000000000000000000000000000000003" as const;
 
-describe('durable signer result recovery',()=>{
- it('atomically releases signed bytes to exactly one concurrent result caller',async()=>{const key=generatePrivateKey(),owner=privateKeyToAccount(key),tx={chainId:46630,to:router,data:'0x12345678' as const,value:0n,gas:100000n,nonce:7,type:'eip1559' as const,maxFeePerGas:20n,maxPriorityFeePerGas:2n,accessList:[]},requestHash=keccak256(serializeTransaction(tx)),store=new SqliteReplayStore(join(temp(),'signer.sqlite')),policy:SignPolicy={chainIds:[46630],accounts:[owner.address],to:[router],maxValue:1n,maxGas:100000n,maxFeePerGas:20n,maxPriorityFeePerGas:2n,dataPrefixes:['0x12345678']},service=new SignerService(owner,store,policy);await service.sign('auth',tx,owner.address);const [a,b]=await Promise.all([Promise.resolve().then(()=>service.result('auth',requestHash,true)),Promise.resolve().then(()=>service.result('auth',requestHash,true))]);expect([a,b].filter(x=>'raw' in x)).toHaveLength(1);expect(a.hash).toBe(b.hash);expect(a.state).toBe('signed');expect(b.state).toBe('signed');store.close()});
+describe("durable signer result recovery", () => {
+  it("atomically releases signed bytes to exactly one concurrent result caller", async () => {
+    const key = generatePrivateKey(),
+      owner = privateKeyToAccount(key),
+      tx = {
+        chainId: 46630,
+        to: router,
+        data: "0x12345678" as const,
+        value: 0n,
+        gas: 100000n,
+        nonce: 7,
+        type: "eip1559" as const,
+        maxFeePerGas: 20n,
+        maxPriorityFeePerGas: 2n,
+        accessList: [],
+      },
+      requestHash = keccak256(serializeTransaction(tx)),
+      store = new SqliteReplayStore(join(temp(), "signer.sqlite")),
+      policy: SignPolicy = {
+        chainIds: [46630],
+        accounts: [owner.address],
+        to: [router],
+        maxValue: 1n,
+        maxGas: 100000n,
+        maxFeePerGas: 20n,
+        maxPriorityFeePerGas: 2n,
+        dataPrefixes: ["0x12345678"],
+      },
+      service = new SignerService(owner, store, policy);
+    await service.sign("auth", tx, owner.address);
+    const [a, b] = await Promise.all([
+      Promise.resolve().then(() => service.result("auth", requestHash, true)),
+      Promise.resolve().then(() => service.result("auth", requestHash, true)),
+    ]);
+    expect([a, b].filter((x) => "raw" in x)).toHaveLength(1);
+    expect(a.hash).toBe(b.hash);
+    expect(a.state).toBe("signed");
+    expect(b.state).toBe("signed");
+    store.close();
+  });
 
- it('recovers a dropped signing response after restart without another authorization or signature and broadcasts once',async()=>{const db=join(temp(),'trading.sqlite'),tx={chainId:46630,from:account,to:router,data:'0x12345678' as const,value:0n,gas:100000n,nonce:7,type:'eip1559' as const,maxFeePerGas:20n,maxPriorityFeePerGas:2n,accessList:[]},request=buildSimulationRequest(tx,'policy'),evidence=createSimulationEvidence(request,{success:true,blockNumber:10n,blockHash:`0x${'11'.repeat(32)}`,transactionHash:request.transactionHash,gasUsed:1n,stateDiffs:[],events:[],assetDeltas:[]}),raw=`0x${'aa'.repeat(100)}` as const,hash=keccak256(raw),rpc:TradingRpc={balance:async()=>0n,quote:async()=>({amountOut:9n,blockNumber:10n,expiresAt:20_000,request,evidence}),simulate:async()=>evidence,broadcast:vi.fn(async()=>hash),receipt:async()=>null,blockHash:async()=>evidence.blockHash as `0x${string}`},approvals={request:vi.fn(),get:vi.fn(()=>({status:'approved'})),decide:vi.fn(),consume:vi.fn()},issuer={issue:vi.fn(async()=>({claims:{id:'auth-1'},signature:'sig'} as any))},sign=vi.fn(async()=>{throw Error('dropped_response')}),result=vi.fn(async()=>({state:'signed',hash,raw})),signer={sign,result},reservations={reserve:async()=> 'reservation',valid:async()=>true,commit:vi.fn(async()=>true),release:async()=>true};const make=(store:ExecutionStore)=>new TradingOrchestrator({chainId:46630,account,router,liveEnabled:true,policy:{version:1,hash:'policy',maxAmountIn:100n,maxSlippageBps:100,approvalRequired:true,finalityBlocks:2},rpc,store,signer,approvalEngine:approvals as any,authorizationIssuer:issuer as any,risk:{assess:async()=>({hash:'risk',allowed:true})},reservations,clock:()=>1000});let store=new ExecutionStore(db),o=make(store);const q=await o.quote({side:'buy',tokenIn:token,tokenOut:router,amountIn:10n,slippageBps:1}),x=await o.execute(q.id,{idempotencyKey:'once',actor:'agent',dryRun:false});await o.refreshApproval(x.id);await expect(o.submit(x.id)).rejects.toThrow('dropped_response');expect(store.get(x.id)).toMatchObject({state:'signing',authorizationId:'auth-1'});store.close();store=new ExecutionStore(db);o=make(store);expect(await o.recoverAndReconcile()).toMatchObject({recovered:1,failed:0});expect(result).toHaveBeenCalledWith({authorizationId:'auth-1',transactionHash:request.transactionHash,recoverRaw:true});expect(issuer).toHaveProperty('issue');expect(issuer.issue).toHaveBeenCalledTimes(1);expect(sign).toHaveBeenCalledTimes(1);expect(rpc.broadcast).toHaveBeenCalledTimes(1);expect(store.get(x.id)).toMatchObject({state:'broadcast',rawTransactionHash:hash,txHash:hash});store.close()});
+  it("recovers a dropped signing response after restart without another authorization or signature and broadcasts once", async () => {
+    const db = join(temp(), "trading.sqlite"),
+      tx = {
+        chainId: 46630,
+        from: account,
+        to: router,
+        data: "0x12345678" as const,
+        value: 0n,
+        gas: 100000n,
+        nonce: 7,
+        type: "eip1559" as const,
+        maxFeePerGas: 20n,
+        maxPriorityFeePerGas: 2n,
+        accessList: [],
+      },
+      request = buildSimulationRequest(tx, "policy"),
+      evidence = createSimulationEvidence(request, {
+        success: true,
+        blockNumber: 10n,
+        blockHash: `0x${"11".repeat(32)}`,
+        transactionHash: request.transactionHash,
+        gasUsed: 1n,
+        stateDiffs: [],
+        events: [],
+        assetDeltas: [],
+      }),
+      raw = `0x${"aa".repeat(100)}` as const,
+      hash = keccak256(raw),
+      rpc: TradingRpc = {
+        balance: async () => 0n,
+        quote: async () => ({
+          amountOut: 9n,
+          blockNumber: 10n,
+          expiresAt: 20_000,
+          request,
+          evidence,
+        }),
+        simulate: async () => evidence,
+        broadcast: vi.fn(async () => hash),
+        receipt: async () => null,
+        blockHash: async () => evidence.blockHash as `0x${string}`,
+      },
+      approvals = {
+        request: vi.fn(),
+        get: vi.fn(() => ({ status: "approved" })),
+        decide: vi.fn(),
+        consume: vi.fn(),
+      },
+      issuer = {
+        issue: vi.fn(
+          async () => ({ claims: { id: "auth-1" }, signature: "sig" }) as any,
+        ),
+      },
+      sign = vi.fn(async () => {
+        throw Error("dropped_response");
+      }),
+      result = vi.fn(async () => ({ state: "signed", hash, raw })),
+      signer = { sign, result },
+      reservations = {
+        reserve: async () => "reservation",
+        valid: async () => true,
+        commit: vi.fn(async () => true),
+        release: async () => true,
+      };
+    const make = (store: ExecutionStore) =>
+      new TradingOrchestrator({
+        chainId: 46630,
+        account,
+        router,
+        liveEnabled: true,
+        policy: {
+          version: 1,
+          hash: "policy",
+          maxAmountIn: 100n,
+          maxSlippageBps: 100,
+          approvalRequired: true,
+          finalityBlocks: 2,
+        },
+        rpc,
+        store,
+        signer,
+        approvalEngine: approvals as any,
+        authorizationIssuer: issuer as any,
+        risk: { assess: async () => ({ hash: "risk", allowed: true }) },
+        reservations,
+        clock: () => 1000,
+      });
+    let store = new ExecutionStore(db),
+      o = make(store);
+    const q = await o.quote({
+        side: "buy",
+        tokenIn: token,
+        tokenOut: router,
+        amountIn: 10n,
+        slippageBps: 1,
+      }),
+      x = await o.execute(q.id, {
+        idempotencyKey: "once",
+        actor: "agent",
+        dryRun: false,
+      });
+    await o.refreshApproval(x.id);
+    await expect(o.submit(x.id)).rejects.toThrow("dropped_response");
+    expect(store.get(x.id)).toMatchObject({
+      state: "signing",
+      authorizationId: "auth-1",
+    });
+    store.close();
+    store = new ExecutionStore(db);
+    o = make(store);
+    expect(await o.recoverAndReconcile()).toMatchObject({
+      recovered: 1,
+      failed: 0,
+    });
+    expect(result).toHaveBeenCalledWith({
+      authorizationId: "auth-1",
+      transactionHash: request.transactionHash,
+      recoverRaw: true,
+    });
+    expect(issuer).toHaveProperty("issue");
+    expect(issuer.issue).toHaveBeenCalledTimes(1);
+    expect(sign).toHaveBeenCalledTimes(1);
+    expect(rpc.broadcast).toHaveBeenCalledTimes(1);
+    expect(store.get(x.id)).toMatchObject({
+      state: "broadcast",
+      rawTransactionHash: hash,
+      txHash: hash,
+    });
+    store.close();
+  });
 });
