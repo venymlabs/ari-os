@@ -5,6 +5,7 @@ import { createHash, timingSafeEqual, randomUUID } from "node:crypto";
 import { readdir } from "node:fs/promises";
 import { DatabaseSync } from "node:sqlite";
 import { loadConfig, type AppConfig } from "./config/index.js";
+import type { ModelProvider } from "./agent/runtime/index.js";
 import { createApplication } from "./app/index.js";
 import { SessionStore } from "./storage/session-store.js";
 import { TRADING_CAPABILITIES } from "./agent/types.js";
@@ -62,7 +63,7 @@ export function createServer(o: ServerOptions): FastifyInstance {
 }
 export async function createStandaloneServer(
   config: AppConfig,
-  overrides: { rpcFetch?: typeof fetch } = {},
+  overrides: { rpcFetch?: typeof fetch; modelProvider?: ModelProvider } = {},
 ) {
   const application = createApplication(config, overrides);
   await application.start();
@@ -227,12 +228,27 @@ export async function createStandaloneServer(
       key || undefined,
     );
     queueMicrotask(async () => {
-      application.runs.emit(run.id, "run.started", {});
-      for await (const e of application.runtime.run({
-        messages: [{ role: "user", content: b.input! }],
-      }))
-        application.runs.emit(run.id, e.type, e);
-      application.runs.setStatus(run.id, "failed");
+      // The runtime reports its outcome as a terminal event; a run that
+      // ends without one (or throws) is treated as failed.
+      let status: "completed" | "failed" | "cancelled" = "failed";
+      try {
+        application.runs.emit(run.id, "run.started", {});
+        for await (const e of application.runtime.run({
+          messages: [{ role: "user", content: b.input! }],
+        })) {
+          application.runs.emit(run.id, e.type, e);
+          if (e.type === "run.completed") status = "completed";
+          else if (e.type === "run.cancelled") status = "cancelled";
+          else if (e.type === "run.failed") status = "failed";
+        }
+      } catch {
+        status = "failed";
+      }
+      try {
+        application.runs.setStatus(run.id, status);
+      } catch {
+        // The store may already be closed during shutdown.
+      }
     });
     return r.code(202).send(pub(run));
   });

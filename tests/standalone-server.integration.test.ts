@@ -136,6 +136,43 @@ describe("standalone authenticated composition", () => {
     });
     await server.close();
   });
+  it("records the run's actual terminal status instead of always failing", async () => {
+    const env = {
+      NODE_ENV: "test",
+      DATA_DIR: temp(),
+      API_BEARER_TOKEN: "secret",
+      API_TENANT_ID: "t",
+      API_SCOPES: "agent:read,agent:write",
+    };
+    const server = await createStandaloneServer(loadConfig(env), {
+      modelProvider: {
+        id: "test",
+        complete: async () => ({
+          message: { role: "assistant", content: "done" },
+        }),
+      },
+    });
+    const made = await server.inject({
+      method: "POST",
+      url: "/v1/runs",
+      headers: bearer(),
+      payload: { sessionId: "s", input: "hi" },
+    });
+    expect(made.statusCode).toBe(202);
+    let status = "";
+    for (let i = 0; i < 50 && status !== "completed"; i++) {
+      await new Promise((r) => setTimeout(r, 10));
+      status = (
+        await server.inject({
+          method: "GET",
+          url: `/v1/runs/${made.json().id}`,
+          headers: bearer(),
+        })
+      ).json().status;
+    }
+    expect(status).toBe("completed");
+    await server.close();
+  });
   it("survives restart with durable run status and resumable SSE; model absence is optional", async () => {
     const dir = temp(),
       env = {
