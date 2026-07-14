@@ -27,6 +27,17 @@ export function toIpcPath(socketPath: string): string {
  */
 export const enforcePosixPermissions = !isWindows;
 
+/**
+ * True when `realpath(p) === p` is a sound "no symlink was traversed"
+ * check. On POSIX any textual difference proves symlink resolution.
+ * Windows aliases the same directory entry under multiple spellings
+ * (drive-letter case, 8.3 short names like RUNNER~1), so the textual
+ * comparison false-positives there; callers must instead rely on their
+ * per-component lstat symlink/junction rejection and continue with the
+ * canonical path realpath returned.
+ */
+export const enforceRealpathIdentity = !isWindows;
+
 /** True when group or other have any access to the inode. */
 export function permissionsAreUnsafe(stats: Pick<Stats, "mode">): boolean {
   if (!enforcePosixPermissions) return false;

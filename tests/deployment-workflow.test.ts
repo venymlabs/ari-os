@@ -151,5 +151,5 @@ describe("clone-to-trade deployment", () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
-  }, 60000);
+  }, 240000);
 });

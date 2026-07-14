@@ -5,6 +5,7 @@ import {
   canonicalHash,
   type ApprovalRequestInput,
 } from "../src/execution/approvals/index.js";
+import { tmpdir } from "node:os";
 
 const engines: ApprovalEngine[] = [];
 const base = (
@@ -144,7 +145,7 @@ describe("durable exact-transaction approvals", () => {
   });
 
   it("uses optimistic revisions across connections and keeps decisions append-only", () => {
-    const path = `/tmp/approvals-${process.pid}-${Date.now()}.db`,
+    const path = `${tmpdir()}/approvals-${process.pid}-${Date.now()}.db`,
       now = { v: 1000 };
     const a = make(path, now).e,
       b = make(path, now).e;

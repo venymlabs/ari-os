@@ -24,7 +24,7 @@ import {
   type ExecutionState,
   type ReplayStore,
 } from "../execution/authorization/index.js";
-import { isWindows, permissionsAreUnsafe } from "../platform.js";
+import { enforceRealpathIdentity, permissionsAreUnsafe } from "../platform.js";
 
 const KDF = { N: 16384, r: 8, p: 1, dkLen: 32 } as const;
 type KdfParams = { N: number; r: number; p: number; dkLen: number };
@@ -77,15 +77,13 @@ export async function assertPrivatePath(
   const absolute = resolve(path),
     root = parse(absolute).root,
     immediate = dirname(absolute);
-  const samePath = (a: string, b: string) =>
-    isWindows ? a.toLowerCase() === b.toLowerCase() : a === b;
   let current = immediate;
   while (current !== root) {
     const st = await lstat(current);
     if (st.isSymbolicLink()) throw Error(`${label}_parent_symlink_forbidden`);
     if (!st.isDirectory()) throw Error(`${label}_parent_invalid`);
     const resolved = await realpath(current);
-    if (!samePath(resolved, current))
+    if (enforceRealpathIdentity && resolved !== current)
       throw Error(`${label}_parent_symlink_forbidden`);
     if (current === immediate && permissionsAreUnsafe(st))
       throw Error(`${label}_parent_permissions_unsafe`);

@@ -21,6 +21,7 @@ import {
   sep,
 } from "node:path";
 import { parseDocument } from "yaml";
+import { enforceRealpathIdentity } from "../../platform.js";
 
 export type SkillSource = "workspace" | "local" | "bundled";
 export interface SkillReadiness {
@@ -409,7 +410,7 @@ export class SkillManager {
         "Controlled root must be a real directory, not a symlink",
       );
     const canonical = await realpath(lexical);
-    if (canonical !== lexical)
+    if (enforceRealpathIdentity && canonical !== lexical)
       throw new Error("Controlled root or ancestor resolves through a symlink");
     return join(canonical, name);
   }
@@ -440,7 +441,10 @@ export class SkillManager {
   ) {
     const target = await this.controlled(name),
       base = await realpath(target);
-    if ((await lstat(target)).isSymbolicLink() || base !== target)
+    if (
+      (await lstat(target)).isSymbolicLink() ||
+      (enforceRealpathIdentity && base !== target)
+    )
       throw new Error("Symlink target rejected");
     const current = await readNoFollow(
         join(target, "SKILL.md"),

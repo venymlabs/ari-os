@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { unlinkSync } from "node:fs";
 import { z } from "zod";
 import { JobQueue, nextScheduleTime } from "../src/autonomy/jobs/index.js";
+import { tmpdir } from "node:os";
 
 const queues: JobQueue[] = [];
 const make = (now = 1_000, random = () => 0) => {
@@ -44,7 +45,7 @@ describe("durable job queue", () => {
   });
 
   it("rejects expired/invalid heartbeats and stale finalization across connections", () => {
-    const path = `/tmp/jobs-race-${process.pid}-${Date.now()}.db`;
+    const path = `${tmpdir()}/jobs-race-${process.pid}-${Date.now()}.db`;
     const now = { v: 100 };
     const a = new JobQueue(path, { clock: () => now.v }),
       b = new JobQueue(path, { clock: () => now.v });
@@ -172,7 +173,7 @@ describe("durable job queue", () => {
   });
 
   it("persists across reopen and clean shutdown is idempotent", () => {
-    const path = `/tmp/jobs-${process.pid}-${Date.now()}.db`;
+    const path = `${tmpdir()}/jobs-${process.pid}-${Date.now()}.db`;
     const q = new JobQueue(path, { clock: () => 1 });
     q.register("x", z.any());
     const id = q.enqueue("x", {}).id;
