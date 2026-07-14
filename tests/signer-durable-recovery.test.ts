@@ -18,6 +18,7 @@ import {
   TradingOrchestrator,
   type TradingRpc,
 } from "../src/live-trading/index.js";
+import { removeDir } from "./helpers.js";
 
 const dirs: string[] = [];
 const temp = () => {
@@ -25,9 +26,7 @@ const temp = () => {
   dirs.push(d);
   return d;
 };
-afterEach(() =>
-  dirs.splice(0).forEach((d) => rmSync(d, { recursive: true, force: true })),
-);
+afterEach(() => dirs.splice(0).forEach((d) => removeDir(d)));
 const account = "0x0000000000000000000000000000000000000001" as const,
   router = "0x0000000000000000000000000000000000000002" as const,
   token = "0x0000000000000000000000000000000000000003" as const;

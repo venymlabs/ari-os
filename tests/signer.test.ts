@@ -11,6 +11,7 @@ import {
   SignerService,
   type SignPolicy,
 } from "../src/signer/index.js";
+import { posixPermissions } from "./helpers.js";
 
 const policy: SignPolicy = {
   chainIds: [46630],
@@ -42,7 +43,7 @@ describe("isolated signer", () => {
       key = generatePrivateKey();
     const address = await createEncryptedKeystore(path, key, "correct horse");
     expect(address).toBe(privateKeyToAccount(key).address);
-    expect((await stat(path)).mode & 0o777).toBe(0o600);
+    if (posixPermissions) expect((await stat(path)).mode & 0o777).toBe(0o600);
     expect(JSON.parse(await readFile(path, "utf8"))).not.toContain(
       key.slice(2),
     );

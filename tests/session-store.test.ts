@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { SessionStore } from "../src/storage/session-store.js";
 import { DatabaseSync } from "node:sqlite";
+import { removeDir } from "./helpers.js";
 
 const dirs: string[] = [];
 function store() {
@@ -15,7 +16,7 @@ function store() {
   };
 }
 afterEach(() => {
-  for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  for (const d of dirs.splice(0)) removeDir(d);
 });
 
 describe("SessionStore", () => {

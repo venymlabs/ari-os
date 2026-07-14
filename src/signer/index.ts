@@ -24,6 +24,7 @@ import {
   type ExecutionState,
   type ReplayStore,
 } from "../execution/authorization/index.js";
+import { isWindows, permissionsAreUnsafe } from "../platform.js";
 
 const KDF = { N: 16384, r: 8, p: 1, dkLen: 32 } as const;
 type KdfParams = { N: number; r: number; p: number; dkLen: number };
@@ -76,14 +77,17 @@ export async function assertPrivatePath(
   const absolute = resolve(path),
     root = parse(absolute).root,
     immediate = dirname(absolute);
+  const samePath = (a: string, b: string) =>
+    isWindows ? a.toLowerCase() === b.toLowerCase() : a === b;
   let current = immediate;
   while (current !== root) {
     const st = await lstat(current);
     if (st.isSymbolicLink()) throw Error(`${label}_parent_symlink_forbidden`);
     if (!st.isDirectory()) throw Error(`${label}_parent_invalid`);
     const resolved = await realpath(current);
-    if (resolved !== current) throw Error(`${label}_parent_symlink_forbidden`);
-    if (current === immediate && (st.mode & 0o077) !== 0)
+    if (!samePath(resolved, current))
+      throw Error(`${label}_parent_symlink_forbidden`);
+    if (current === immediate && permissionsAreUnsafe(st))
       throw Error(`${label}_parent_permissions_unsafe`);
     current = dirname(current);
   }
@@ -91,7 +95,7 @@ export async function assertPrivatePath(
     const st = await lstat(absolute);
     if (st.isSymbolicLink()) throw Error(`${label}_symlink_forbidden`);
     if (!st.isFile()) throw Error(`${label}_format_invalid`);
-    if ((st.mode & 0o077) !== 0) throw Error(`${label}_permissions_unsafe`);
+    if (permissionsAreUnsafe(st)) throw Error(`${label}_permissions_unsafe`);
   }
 }
 export async function createEncryptedKeystore(
@@ -286,7 +290,7 @@ export async function loadSignPolicy(path: string): Promise<LoadedSignPolicy> {
   const st = await lstat(path);
   if (st.isSymbolicLink()) throw Error("policy_symlink_forbidden");
   if (!st.isFile()) throw Error("policy_format_invalid");
-  if ((st.mode & 0o077) !== 0) throw Error("policy_permissions_unsafe");
+  if (permissionsAreUnsafe(st)) throw Error("policy_permissions_unsafe");
   const raw = await readFile(path, "utf8"),
     x = JSON.parse(raw);
   if (

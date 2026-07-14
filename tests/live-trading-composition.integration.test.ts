@@ -17,15 +17,15 @@ import {
   ProductionRiskEvaluator,
   ReservationLedger,
 } from "../src/execution/control/index.js";
+import { posixPermissions, removeDir } from "./helpers.js";
+import { toIpcPath } from "../src/platform.js";
 const dirs: string[] = [];
 const temp = () => {
   const d = mkdtempSync(join(tmpdir(), "live-compose-"));
   dirs.push(d);
   return d;
 };
-afterEach(() =>
-  dirs.splice(0).forEach((d) => rmSync(d, { recursive: true, force: true })),
-);
+afterEach(() => dirs.splice(0).forEach((d) => removeDir(d)));
 const A = "0x0000000000000000000000000000000000000001",
   B = "0x0000000000000000000000000000000000000002";
 function liveEnv(d: string) {
@@ -91,7 +91,9 @@ async function signerStatus(
         c.end(JSON.stringify({ ok: true, result: status }) + "\n");
     });
   });
-  await new Promise<void>((r) => server.listen(env.SIGNER_SOCKET_PATH, r));
+  await new Promise<void>((r) =>
+    server.listen(toIpcPath(env.SIGNER_SOCKET_PATH!), r),
+  );
   return server;
 }
 describe("live trading configuration and production composition", () => {
@@ -256,8 +258,10 @@ describe("live trading configuration and production composition", () => {
     expect(() =>
       loadConfig({ ...liveEnv(d), SIGNER_SOCKET_PATH: "relative.sock" }),
     ).toThrow(/absolute/);
-    chmodSync(e.SIGNER_TOKEN_PATH, 0o644);
-    expect(() => loadConfig(e)).toThrow(/permissions/);
+    if (posixPermissions) {
+      chmodSync(e.SIGNER_TOKEN_PATH, 0o644);
+      expect(() => loadConfig(e)).toThrow(/permissions/);
+    }
   });
   it("registers trading only when configured and reports signer readiness honestly", async () => {
     const d = temp();

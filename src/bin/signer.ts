@@ -7,6 +7,12 @@ import { fileURLToPath } from "node:url";
 import { realpathSync } from "node:fs";
 import { generatePrivateKey } from "viem/accounts";
 import {
+  isWindows,
+  permissionsAreUnsafe,
+  readFd,
+  toIpcPath,
+} from "../platform.js";
+import {
   createEncryptedKeystore,
   JsonFrameDecoder,
   loadSignPolicy,
@@ -45,7 +51,7 @@ function args(xs: string[]) {
 }
 async function secret(fd: number, label: string) {
   if (process.stdin.isTTY) process.stderr.write(`${label}: `);
-  const b = await readFile(`/proc/self/fd/${fd}`),
+  const b = await readFd(fd),
     s = b.toString("utf8").trim();
   b.fill(0);
   if (!s) throw Error(`${label.toLowerCase()}_required`);
@@ -53,7 +59,7 @@ async function secret(fd: number, label: string) {
 }
 async function safeSecretFile(path: string) {
   const st = await lstat(path);
-  if (st.isSymbolicLink() || !st.isFile() || (st.mode & 0o077) !== 0)
+  if (st.isSymbolicLink() || !st.isFile() || permissionsAreUnsafe(st))
     throw Error("secret_file_unsafe");
   return (await readFile(path, "utf8")).trim();
 }
@@ -69,7 +75,7 @@ async function rpc(url: string, method: string, params: unknown[]) {
 }
 function send(socket: string, request: unknown) {
   return new Promise<any>((resolve, reject) => {
-    const c = createConnection(socket),
+    const c = createConnection(toIpcPath(socket)),
       d = new JsonFrameDecoder();
     c.on("connect", () => c.write(`${JSON.stringify(request)}\n`));
     c.on("data", (b) => {
@@ -293,8 +299,10 @@ export async function main(argv = process.argv.slice(2)) {
     }
   }, reconcileInterval);
   reconcileTimer.unref();
-  server.listen(socket, async () => {
-    await chmod(socket, 0o600);
+  server.listen(toIpcPath(socket), async () => {
+    // Named pipes are not filesystem inodes; chmod applies to Unix
+    // domain sockets only.
+    if (!isWindows) await chmod(socket, 0o600);
     if (process.send) process.send("ready");
   });
   for (const sig of ["SIGINT", "SIGTERM"] as const)

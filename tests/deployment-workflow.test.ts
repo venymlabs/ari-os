@@ -4,7 +4,21 @@ import { promisify } from "node:util";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-const exec = promisify(execFile);
+const execFileAsync = promisify(execFile);
+const exec = (
+  cmd: string,
+  args: string[],
+  opts: Record<string, unknown> = {},
+) => {
+  const windows = process.platform === "win32";
+  const target = windows && cmd === "npm" ? "npm.cmd" : cmd;
+  const needsShell = windows && (target.endsWith(".cmd") || cmd === "npm");
+  return execFileAsync(
+    target,
+    args,
+    needsShell ? { ...opts, shell: true } : opts,
+  );
+};
 const dockerComposeAvailable = await exec("docker", ["compose", "version"])
   .then(() => true)
   .catch(() => false);
@@ -114,8 +128,14 @@ describe("clone-to-trade deployment", () => {
       await exec("npm", ["install", join(process.cwd(), packed)], {
         cwd: root,
       });
-      const raos = join(root, "node_modules/.bin/raos"),
-        signer = join(root, "node_modules/.bin/raos-signer");
+      const shim = (name: string) =>
+        join(
+          root,
+          "node_modules/.bin",
+          process.platform === "win32" ? `${name}.cmd` : name,
+        );
+      const raos = shim("raos"),
+        signer = shim("raos-signer");
       expect((await exec(raos, ["--help"], { cwd: root })).stdout).toContain(
         "wallet",
       );

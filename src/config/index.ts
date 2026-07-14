@@ -4,6 +4,7 @@ import { isAbsolute, join, resolve } from "node:path";
 import { getAddress, type Address } from "viem";
 import { z } from "zod";
 import { NOXA_FACTORY_ADDRESS, NOXA_FACTORY_START_BLOCK } from "../noxa.js";
+import { permissionsAreUnsafe } from "../platform.js";
 const boolean = z.enum(["true", "false"]).transform((v) => v === "true");
 const url = z
   .string()
@@ -137,7 +138,7 @@ const privateFile = (p: string, n: string) => {
   const s = lstatSync(p);
   if (!s.isFile() || s.isSymbolicLink())
     throw Error(`${n} must be a regular file`);
-  if ((s.mode & 0o077) !== 0) throw Error(`${n} permissions are unsafe`);
+  if (permissionsAreUnsafe(s)) throw Error(`${n} permissions are unsafe`);
 };
 export function loadConfig(
   env: Record<string, string | undefined> = process.env,

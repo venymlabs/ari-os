@@ -12,6 +12,7 @@ import {
 } from "../src/app/adapters.js";
 import { registerBuiltInTools } from "../src/tools/index.js";
 import { createApplication } from "../src/app/index.js";
+import { posixPermissions, removeDir } from "./helpers.js";
 
 const dirs: string[] = [];
 const temp = () => {
@@ -19,9 +20,7 @@ const temp = () => {
   dirs.push(d);
   return d;
 };
-afterEach(() =>
-  dirs.splice(0).forEach((d) => rmSync(d, { recursive: true, force: true })),
-);
+afterEach(() => dirs.splice(0).forEach((d) => removeDir(d)));
 
 describe("validated executable foundation", () => {
   it("creates an absolute private data layout and defaults to testnet read-only", () => {
@@ -30,7 +29,7 @@ describe("validated executable foundation", () => {
     expect(c.network).toBe("testnet");
     expect(c.execution).toBe("read-only");
     expect(c.paths.sessions).toBe(join(d, "sessions.sqlite"));
-    expect(statSync(d).mode & 0o777).toBe(0o700);
+    if (posixPermissions) expect(statSync(d).mode & 0o777).toBe(0o700);
   });
   it("rejects relative data dirs and requires a mainnet double opt-in", () => {
     expect(() =>

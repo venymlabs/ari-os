@@ -85,12 +85,21 @@ const num = (r: Row, k: string) => Number(r[k]);
 export class SessionStore {
   private readonly db: DatabaseSync;
   private depth = 0;
+  private fts = false;
   constructor(path: string) {
     this.db = new DatabaseSync(path);
-    this.db.exec(
-      "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000",
-    );
-    this.migrate();
+    try {
+      this.db.exec(
+        "PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000",
+      );
+      this.migrate();
+    } catch (e) {
+      // Do not leak the open handle when the store is unusable.
+      try {
+        this.db.close();
+      } catch {}
+      throw e;
+    }
   }
   private migrate() {
     this.db.exec("BEGIN IMMEDIATE");
@@ -122,12 +131,27 @@ CREATE TABLE IF NOT EXISTS messages(sequence INTEGER PRIMARY KEY AUTOINCREMENT,i
 CREATE INDEX IF NOT EXISTS messages_session_sequence ON messages(session_id,sequence); CREATE TABLE IF NOT EXISTS runs(id TEXT PRIMARY KEY,session_id TEXT NOT NULL REFERENCES sessions(id),status TEXT NOT NULL CHECK(status IN('running','completed','failed','cancelled')),started_at INTEGER NOT NULL,finished_at INTEGER,CHECK((status='running' AND finished_at IS NULL) OR (status<>'running' AND finished_at IS NOT NULL))); CREATE INDEX IF NOT EXISTS runs_unfinished ON runs(status,started_at) WHERE finished_at IS NULL;
 CREATE TABLE IF NOT EXISTS tool_calls(id TEXT PRIMARY KEY,session_id TEXT NOT NULL,message_id TEXT NOT NULL,tool_name TEXT NOT NULL,arguments_json TEXT NOT NULL,created_at INTEGER NOT NULL,FOREIGN KEY(session_id,message_id) REFERENCES messages(session_id,id));
 CREATE TABLE IF NOT EXISTS financial_evidence(id TEXT PRIMARY KEY,payload_json TEXT NOT NULL,sha256 TEXT UNIQUE NOT NULL,created_at INTEGER NOT NULL); CREATE TRIGGER IF NOT EXISTS evidence_no_update BEFORE UPDATE ON financial_evidence BEGIN SELECT RAISE(ABORT,'financial evidence is immutable');END; CREATE TRIGGER IF NOT EXISTS evidence_no_delete BEFORE DELETE ON financial_evidence BEGIN SELECT RAISE(ABORT,'financial evidence is immutable');END;
-CREATE TABLE IF NOT EXISTS tool_results(id TEXT PRIMARY KEY,tool_call_id TEXT UNIQUE NOT NULL REFERENCES tool_calls(id),output_json TEXT NOT NULL,created_at INTEGER NOT NULL,evidence_ref TEXT REFERENCES financial_evidence(id));
-CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(content,content='messages',content_rowid='sequence'); CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN INSERT INTO messages_fts(rowid,content)VALUES(new.sequence,new.content);END; CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN INSERT INTO messages_fts(messages_fts,rowid,content)VALUES('delete',old.sequence,old.content);END;`);
+CREATE TABLE IF NOT EXISTS tool_results(id TEXT PRIMARY KEY,tool_call_id TEXT UNIQUE NOT NULL REFERENCES tool_calls(id),output_json TEXT NOT NULL,created_at INTEGER NOT NULL,evidence_ref TEXT REFERENCES financial_evidence(id));`);
       this.db.prepare("UPDATE schema_meta SET version=2 WHERE id=1").run();
-      this.db.exec(
-        "INSERT INTO messages_fts(messages_fts) VALUES('rebuild'); COMMIT",
-      );
+      // Full-text search is an accelerator, not a dependency. Some Node
+      // builds ship node:sqlite without the fts5 module (e.g. Node < 22.16
+      // on Windows); fall back to LIKE-based search there instead of
+      // refusing to open the store.
+      try {
+        this.db
+          .exec(`CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(content,content='messages',content_rowid='sequence'); CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN INSERT INTO messages_fts(rowid,content)VALUES(new.sequence,new.content);END; CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN INSERT INTO messages_fts(messages_fts,rowid,content)VALUES('delete',old.sequence,old.content);END;
+INSERT INTO messages_fts(messages_fts) VALUES('rebuild');`);
+        this.fts = true;
+      } catch (e) {
+        if (!/no such module/i.test(String(e))) throw e;
+        // The database may have been created by an fts5-capable build;
+        // drop the sync triggers so message writes do not fail through
+        // references to the unavailable virtual table.
+        this.db.exec(
+          "DROP TRIGGER IF EXISTS messages_ai; DROP TRIGGER IF EXISTS messages_ad;",
+        );
+      }
+      this.db.exec("COMMIT");
     } catch (e) {
       try {
         this.db.exec("ROLLBACK");
@@ -461,19 +485,37 @@ CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(content,content='mess
       limit = Math.max(0, o.limit ?? 20);
     let rows: Row[];
     try {
-      rows = (
-        o.sessionId
-          ? this.db
-              .prepare(
-                "SELECT m.* FROM messages_fts f JOIN messages m ON m.sequence=f.rowid WHERE messages_fts MATCH ? AND m.session_id=? LIMIT ?",
-              )
-              .all(q, o.sessionId, limit)
-          : this.db
-              .prepare(
-                "SELECT m.* FROM messages_fts f JOIN messages m ON m.sequence=f.rowid WHERE messages_fts MATCH ? LIMIT ?",
-              )
-              .all(q, limit)
-      ) as Row[];
+      if (this.fts) {
+        rows = (
+          o.sessionId
+            ? this.db
+                .prepare(
+                  "SELECT m.* FROM messages_fts f JOIN messages m ON m.sequence=f.rowid WHERE messages_fts MATCH ? AND m.session_id=? LIMIT ?",
+                )
+                .all(q, o.sessionId, limit)
+            : this.db
+                .prepare(
+                  "SELECT m.* FROM messages_fts f JOIN messages m ON m.sequence=f.rowid WHERE messages_fts MATCH ? LIMIT ?",
+                )
+                .all(q, limit)
+        ) as Row[];
+      } else {
+        // Plain-substring fallback when fts5 is unavailable in this build.
+        const pattern = `%${q.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
+        rows = (
+          o.sessionId
+            ? this.db
+                .prepare(
+                  "SELECT m.* FROM messages m WHERE m.content LIKE ? ESCAPE '\\' AND m.session_id=? ORDER BY m.sequence LIMIT ?",
+                )
+                .all(pattern, o.sessionId, limit)
+            : this.db
+                .prepare(
+                  "SELECT m.* FROM messages m WHERE m.content LIKE ? ESCAPE '\\' ORDER BY m.sequence LIMIT ?",
+                )
+                .all(pattern, limit)
+        ) as Row[];
+      }
     } catch {
       throw new Error("Invalid search query");
     }

@@ -8,6 +8,7 @@ import {
   TradingOrchestrator,
 } from "../src/live-trading/index.js";
 import { registerTradingApi } from "../src/live-trading/api.js";
+import { removeDir } from "./helpers.js";
 
 const A = "0x0000000000000000000000000000000000000001" as const;
 describe("automatic durable recovery and operational defaults", () => {
@@ -72,7 +73,7 @@ describe("automatic durable recovery and operational defaults", () => {
       expect(store.get(xs[1]!.id)?.state).toBe("reconciliation-required");
     } finally {
       store.close();
-      rmSync(d, { recursive: true, force: true });
+      removeDir(d);
     }
   });
   it("exposes reconciliation only to its exact scope", async () => {

@@ -9,11 +9,10 @@ import {
   MarketTriggerEngine,
   reorgCorrection,
 } from "../src/autonomy/events/index.js";
+import { removeDir } from "./helpers.js";
 
 const dirs: string[] = [];
-afterEach(() =>
-  dirs.splice(0).forEach((d) => rmSync(d, { recursive: true, force: true })),
-);
+afterEach(() => dirs.splice(0).forEach((d) => removeDir(d)));
 const event = (
   type: string,
   payload: unknown = {},

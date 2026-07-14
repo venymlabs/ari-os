@@ -7,15 +7,14 @@ import { TRADING_CAPABILITIES } from "../src/agent/types.js";
 import { registerBuiltInTools } from "../src/tools/index.js";
 import { loadConfig, sanitizedConfig } from "../src/config/index.js";
 import { createApplication } from "../src/app/index.js";
+import { removeDir } from "./helpers.js";
 const dirs: string[] = [];
 const temp = () => {
   const d = mkdtempSync(join(tmpdir(), "compose-"));
   dirs.push(d);
   return d;
 };
-afterEach(() =>
-  dirs.splice(0).forEach((d) => rmSync(d, { recursive: true, force: true })),
-);
+afterEach(() => dirs.splice(0).forEach((d) => removeDir(d)));
 const invoke = (r: ToolRegistry, name: string, input: unknown = {}) =>
   r.invoke(name, input, {
     capabilities: [

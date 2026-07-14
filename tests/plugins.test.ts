@@ -10,6 +10,7 @@ import {
   PluginHost,
   type PluginWorker,
 } from "../src/plugins/index.js";
+import { removeDir } from "./helpers.js";
 
 const dirs: string[] = [];
 const temp = () => {
@@ -17,9 +18,7 @@ const temp = () => {
   dirs.push(d);
   return d;
 };
-afterEach(() =>
-  dirs.splice(0).forEach((d) => rmSync(d, { recursive: true, force: true })),
-);
+afterEach(() => dirs.splice(0).forEach((d) => removeDir(d)));
 const base = {
   schemaVersion: 1,
   id: "com.acme.prices",

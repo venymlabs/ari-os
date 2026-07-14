@@ -5,7 +5,19 @@ import { join } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
-const execFileAsync = promisify(execFile);
+const execFileRaw = promisify(execFile);
+const execFileAsync = (
+  cmd: string,
+  args: string[],
+  opts: Record<string, unknown> = {},
+) =>
+  execFileRaw(
+    process.platform === "win32" && cmd === "npm" ? "npm.cmd" : cmd,
+    args,
+    process.platform === "win32" && cmd === "npm"
+      ? { ...opts, shell: true }
+      : opts,
+  );
 import { createServer } from "../src/server.js";
 import { resolveInputArgument } from "../src/bin/robinhood-agent-os.js";
 import {

@@ -176,14 +176,22 @@ function configured(config: unknown, path: string) {
 }
 async function binaryExists(name: string, pathValue: string | undefined) {
   if (!BIN.test(name) || pathValue === undefined) return false;
+  // Windows resolves executables through PATHEXT-style suffixes.
+  const candidates =
+    process.platform === "win32"
+      ? [name, `${name}.exe`, `${name}.cmd`, `${name}.bat`, `${name}.com`]
+      : [name];
   for (const dir of pathValue.split(delimiter).filter(Boolean)) {
-    try {
-      const s = await stat(join(dir, name));
-      if (s.isFile()) {
-        await access(join(dir, name), constants.X_OK);
-        return true;
-      }
-    } catch {}
+    for (const candidate of candidates) {
+      const full = join(dir, candidate);
+      try {
+        const s = await stat(full);
+        if (s.isFile()) {
+          await access(full, constants.X_OK);
+          return true;
+        }
+      } catch {}
+    }
   }
   return false;
 }
@@ -200,18 +208,29 @@ function contained(base: string, target: string) {
   return r !== ".." && !r.startsWith(".." + sep) && !isAbsolute(r);
 }
 async function readNoFollow(path: string, base: string, max = MAX_FILE) {
-  const fh = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  const noFollow = constants.O_NOFOLLOW ?? 0;
+  const fh = await open(path, constants.O_RDONLY | noFollow);
   try {
     const s = await fh.stat();
     if (!s.isFile()) throw new Error("Path is not a regular file");
     if (s.size > max) throw new Error("File exceeds size limit");
-    const canonical = await realpath(`/proc/self/fd/${fh.fd}`);
+    // Linux can resolve the opened descriptor itself, which is immune to
+    // path swaps after open; elsewhere fall back to resolving the path.
+    const canonical =
+      process.platform === "linux"
+        ? await realpath(`/proc/self/fd/${fh.fd}`)
+        : await realpath(path);
     if (!contained(base, canonical)) throw new Error("Symlink escape rejected");
     return await fh.readFile("utf8");
   } finally {
     await fh.close();
   }
 }
+// Support-file map keys participate in skill checksums; keep them in
+// POSIX form so digests are identical across platform path separators.
+const posixKey = (path: string) => path.split(/[\\/]/).join("/");
+const posixKeyed = (files: Record<string, string>) =>
+  new Map(Object.entries(files).map(([k, v]) => [posixKey(k), v] as const));
 async function supportFiles(dir: string, base: string) {
   const out = new Map<string, string>();
   for (const top of SUPPORT) {
@@ -232,7 +251,7 @@ async function supportFiles(dir: string, base: string) {
         throw new Error("Supporting file count limit exceeded");
       const full = join(ent.parentPath, ent.name),
         rel = relative(dir, full);
-      out.set(rel, await readNoFollow(full, base));
+      out.set(posixKey(rel), await readNoFollow(full, base));
     }
   }
   return out;
@@ -410,8 +429,8 @@ export class SkillManager {
       dir: target,
       text,
       parsed: p,
-      support: new Map(Object.entries(files)),
-      digest: digest(text, new Map(Object.entries(files))),
+      support: posixKeyed(files),
+      digest: digest(text, posixKeyed(files)),
     });
   }
   async update(
@@ -443,12 +462,7 @@ export class SkillManager {
       await rename(target, backup);
       moved = true;
       await rename(temp, target);
-      const parent = await open(dirname(target), constants.O_RDONLY);
-      try {
-        await parent.sync();
-      } finally {
-        await parent.close();
-      }
+      await syncDir(dirname(target));
       await rm(backup, { recursive: true });
     } catch (e) {
       await rm(temp, { recursive: true, force: true });
@@ -460,7 +474,7 @@ export class SkillManager {
       }
       throw e;
     }
-    const sf = new Map(Object.entries(options.files ?? {}));
+    const sf = posixKeyed(options.files ?? {});
     return this.metadata({
       source: "workspace",
       dir: target,
@@ -507,15 +521,33 @@ export class SkillManager {
           await fh.close();
         }
       }
-      const dh = await open(target, constants.O_RDONLY);
-      try {
-        await dh.sync();
-      } finally {
-        await dh.close();
-      }
+      await syncDir(target);
     } catch (e) {
       await rm(target, { recursive: true, force: true });
       throw e;
     }
+  }
+}
+
+// Directory fsync is a POSIX durability refinement. Windows cannot sync
+// a directory handle and some filesystems refuse it; only those specific
+// failures are tolerated so real I/O errors still propagate.
+const SYNC_DIR_UNSUPPORTED = new Set(["EPERM", "EISDIR", "ENOTSUP", "EINVAL"]);
+async function syncDir(path: string) {
+  let dh;
+  try {
+    dh = await open(path, constants.O_RDONLY);
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code ?? "";
+    if (SYNC_DIR_UNSUPPORTED.has(code) || code === "EACCES") return;
+    throw e;
+  }
+  try {
+    await dh.sync();
+  } catch (e) {
+    if (!SYNC_DIR_UNSUPPORTED.has((e as NodeJS.ErrnoException).code ?? ""))
+      throw e;
+  } finally {
+    await dh.close();
   }
 }

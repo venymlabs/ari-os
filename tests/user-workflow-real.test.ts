@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createUserWorkflow } from "../src/cli/user-workflow.js";
 import { createRemoteServices } from "../src/bin/robinhood-agent-os.js";
+import { posixPermissions } from "./helpers.js";
 const dirs: string[] = [];
 afterEach(() =>
   Promise.all(
@@ -156,7 +157,8 @@ describe("real trading CLI workflow", () => {
       "operator.key",
     ]) {
       expect(out.files).toContain(f);
-      expect((await stat(join(d, f))).mode & 0o077).toBe(0);
+      if (posixPermissions)
+        expect((await stat(join(d, f))).mode & 0o077).toBe(0);
     }
     const sign = JSON.parse(
       await readFile(join(d, "sign-policy.json"), "utf8"),

@@ -7,6 +7,7 @@ import {
   MemoryStore,
   MemoryStoreError,
 } from "../src/cognition/memory/index.js";
+import { removeDir } from "./helpers.js";
 
 const dirs: string[] = [];
 function fixture(options: ConstructorParameters<typeof MemoryStore>[1] = {}) {
@@ -16,8 +17,7 @@ function fixture(options: ConstructorParameters<typeof MemoryStore>[1] = {}) {
   return { path, store: new MemoryStore(path, options) };
 }
 afterEach(() => {
-  for (const dir of dirs.splice(0))
-    rmSync(dir, { recursive: true, force: true });
+  for (const dir of dirs.splice(0)) removeDir(dir);
 });
 
 const userFact = (value: string, source = "user:message:m1") => ({

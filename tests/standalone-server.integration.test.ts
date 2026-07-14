@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { loadConfig } from "../src/config/index.js";
 import { createStandaloneServer } from "../src/server.js";
+import { removeDir } from "./helpers.js";
 
 const dirs: string[] = [];
 const temp = () => {
@@ -12,9 +13,7 @@ const temp = () => {
   dirs.push(d);
   return d;
 };
-afterEach(() =>
-  dirs.splice(0).forEach((d) => rmSync(d, { recursive: true, force: true })),
-);
+afterEach(() => dirs.splice(0).forEach((d) => removeDir(d)));
 const bearer = (token = "secret") => ({ authorization: `Bearer ${token}` });
 
 describe("standalone authenticated composition", () => {

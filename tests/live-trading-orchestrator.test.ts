@@ -7,15 +7,14 @@ import {
   TradingOrchestrator,
   type TradingRpc,
 } from "../src/live-trading/index.js";
+import { removeDir } from "./helpers.js";
 const dirs: string[] = [];
 const temp = () => {
   const d = mkdtempSync(join(tmpdir(), "trade-"));
   dirs.push(d);
   return d;
 };
-afterEach(() =>
-  dirs.splice(0).forEach((x) => rmSync(x, { recursive: true, force: true })),
-);
+afterEach(() => dirs.splice(0).forEach((x) => removeDir(x)));
 const A = "0x0000000000000000000000000000000000000001" as const,
   T = "0x0000000000000000000000000000000000000002" as const;
 function rpc(): TradingRpc {

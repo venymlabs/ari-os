@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createUserWorkflow } from "../src/cli/user-workflow.js";
+import { posixPermissions } from "./helpers.js";
 const dirs: string[] = [];
 afterEach(() =>
   Promise.all(
@@ -21,7 +22,8 @@ describe("clone-to-trade workflow", () => {
     expect(JSON.stringify(out)).not.toContain(
       await readFile(join(dir, "signer.token"), "utf8"),
     );
-    expect((await stat(join(dir, "signer.token"))).mode & 0o077).toBe(0);
+    if (posixPermissions)
+      expect((await stat(join(dir, "signer.token"))).mode & 0o077).toBe(0);
     expect(
       JSON.parse(await readFile(join(dir, "config.json"), "utf8")).mode,
     ).toBe("local");

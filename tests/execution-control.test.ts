@@ -11,6 +11,7 @@ import {
   type PolicyDocument,
   type TradeRequest,
 } from "../src/execution/control/index.js";
+import { removeDir } from "./helpers.js";
 
 const policy = (): PolicyDocument => ({
   version: "1",
@@ -258,7 +259,7 @@ describe("hardened durable control", () => {
       ).toContain("asset_hourly_limit_exceeded");
       expect(new ReservationLedger(db).has("a")).toBe(true);
     } finally {
-      rmSync(d, { recursive: true, force: true });
+      removeDir(d);
     }
   });
   it("uses trusted commit time and records reconciliation discrepancy", () => {
@@ -367,7 +368,7 @@ describe("production risk", () => {
       ).toBe(true);
       expect(new ReservationLedger(db).has("b")).toBe(true);
     } finally {
-      rmSync(d, { recursive: true, force: true });
+      removeDir(d);
     }
   });
   it("aggregates only normalized quote values across mixed tokens and decimals", () => {
@@ -432,7 +433,7 @@ describe("production risk", () => {
         ),
       ).toBe(false);
     } finally {
-      rmSync(d, { recursive: true, force: true });
+      removeDir(d);
     }
   });
   it("fails closed when aggregate exposure is enabled without valuation evidence", () => {
@@ -490,7 +491,7 @@ describe("production risk", () => {
         ),
       ).toBe(false);
     } finally {
-      rmSync(d, { recursive: true, force: true });
+      removeDir(d);
     }
   });
   it("fails closed across connections when any active reservation has different quote precision", () => {
@@ -530,7 +531,7 @@ describe("production risk", () => {
         ),
       ).toBe(false);
     } finally {
-      rmSync(d, { recursive: true, force: true });
+      removeDir(d);
     }
   });
   it("blocks aggregate reservations while an unvalued migration row is active", () => {
@@ -566,7 +567,7 @@ describe("production risk", () => {
         true,
       );
     } finally {
-      rmSync(d, { recursive: true, force: true });
+      removeDir(d);
     }
   });
   it("enforces a configured ledger-wide aggregate quote unit", () => {

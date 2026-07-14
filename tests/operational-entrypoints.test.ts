@@ -4,7 +4,19 @@ import { promisify } from "node:util";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-const exec = promisify(execFile);
+const execFileAsync = promisify(execFile);
+const exec = (
+  cmd: string,
+  args: string[],
+  opts: Record<string, unknown> = {},
+) =>
+  execFileAsync(
+    process.platform === "win32" && cmd === "npm" ? "npm.cmd" : cmd,
+    args,
+    process.platform === "win32" && cmd === "npm"
+      ? { ...opts, shell: true }
+      : opts,
+  );
 const dirs: string[] = [];
 afterEach(async () =>
   Promise.all(
@@ -44,7 +56,7 @@ describe("operational package entrypoints", () => {
       });
       expect(JSON.parse(stdout)).toMatchObject({ command, ok: true });
     }
-  });
+  }, 60000);
   it("runs worker once against the durable queue", async () => {
     const env = await envFor();
     const { stdout } = await exec(
@@ -55,7 +67,7 @@ describe("operational package entrypoints", () => {
     expect(JSON.parse(stdout)).toMatchObject({
       worker: { once: true, processed: false },
     });
-  });
+  }, 60000);
   it("server bootstrap creates and starts the real application", async () => {
     const source = await readFile("src/server.ts", "utf8");
     expect(source).toContain("loadConfig");

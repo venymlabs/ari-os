@@ -30,6 +30,8 @@ import {
   assertPrivatePath,
 } from "../src/signer/index.js";
 import { createSignerWireConfig } from "../src/bin/signer.js";
+import { canSymlink, posixPermissions } from "./helpers.js";
+const symlinksAvailable = canSymlink();
 
 const h = (x: string) => `0x${createHash("sha256").update(x).digest("hex")}`;
 const macKey = "wire-test-key";
@@ -86,21 +88,26 @@ describe("production signer primitives", () => {
         "keystore_kdf_invalid",
       );
     }
-    await chmod(dir, 0o755);
-    await expect(assertPrivatePath(p, "keystore", true)).rejects.toThrow(
-      "keystore_parent_permissions_unsafe",
-    );
+    if (posixPermissions) {
+      await chmod(dir, 0o755);
+      await expect(assertPrivatePath(p, "keystore", true)).rejects.toThrow(
+        "keystore_parent_permissions_unsafe",
+      );
+    }
   });
-  it("rejects path substitution through symlinked parent components", async () => {
-    const root = await mkdtemp(join(tmpdir(), "path-")),
-      real = join(root, "real"),
-      link = join(root, "link");
-    await mkdir(real, { mode: 0o700 });
-    await symlink(real, link);
-    await expect(
-      assertPrivatePath(join(link, "wallet.json"), "keystore", false),
-    ).rejects.toThrow("keystore_parent_symlink_forbidden");
-  });
+  it.skipIf(!symlinksAvailable)(
+    "rejects path substitution through symlinked parent components",
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), "path-")),
+        real = join(root, "real"),
+        link = join(root, "link");
+      await mkdir(real, { mode: 0o700 });
+      await symlink(real, link);
+      await expect(
+        assertPrivatePath(join(link, "wallet.json"), "keystore", false),
+      ).rejects.toThrow("keystore_parent_symlink_forbidden");
+    },
+  );
   it("bounds newline JSON frames and rejects malformed input", () => {
     const d = new JsonFrameDecoder(32);
     expect(d.push(Buffer.from('{"a":1}\n'))).toEqual([{ a: 1 }]);
@@ -131,15 +138,20 @@ describe("production signer primitives", () => {
     const loaded = await loadSignPolicy(p);
     expect(loaded.version).toBe(1);
     expect(loaded.hash).toMatch(/^0x[0-9a-f]{64}$/);
-    await chmod(p, 0o644);
-    await expect(loadSignPolicy(p)).rejects.toThrow(
-      "policy_permissions_unsafe",
-    );
-    const link = join(dir, "link");
-    await symlink(p, link);
-    await expect(loadSignPolicy(link)).rejects.toThrow(
-      "policy_symlink_forbidden",
-    );
+    if (posixPermissions) {
+      await chmod(p, 0o644);
+      await expect(loadSignPolicy(p)).rejects.toThrow(
+        "policy_permissions_unsafe",
+      );
+      await chmod(p, 0o600);
+    }
+    if (symlinksAvailable) {
+      const link = join(dir, "link");
+      await symlink(p, link);
+      await expect(loadSignPolicy(link)).rejects.toThrow(
+        "policy_symlink_forbidden",
+      );
+    }
   });
   it("verifies the exact authorization envelope before signing and survives replay-store restart", async () => {
     const dir = await mkdtemp(join(tmpdir(), "wire-sign-")),

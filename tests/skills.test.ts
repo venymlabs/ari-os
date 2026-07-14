@@ -11,6 +11,8 @@ import {
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { SkillManager } from "../src/cognition/skills/index.js";
+import { canSymlink, removeDir } from "./helpers.js";
+const symlinksAvailable = canSymlink();
 
 const dirs: string[] = [];
 const temp = () => {
@@ -39,7 +41,7 @@ const doc = (
 ) =>
   `---\nname: ${name}\ndescription: ${name} description\nversion: ${version}\ncapabilities: [research, analysis]\nrequires:\n  env: [TEST_SKILL_TOKEN]\n  binaries: [node]\n  config: [network.enabled]\n---\n${body}\n`;
 afterEach(() => {
-  for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  for (const d of dirs.splice(0)) removeDir(d);
 });
 
 describe("SkillManager progressive disclosure", () => {
@@ -91,26 +93,29 @@ describe("SkillManager progressive disclosure", () => {
     expect(JSON.stringify(meta)).not.toContain("super-secret");
   });
 
-  it("loads supporting files explicitly and blocks traversal and symlink escapes", async () => {
-    const root = temp(),
-      outside = temp();
-    put(root, "alpha", doc("alpha"), { "references/guide.txt": "guide" });
-    writeFileSync(join(outside, "secret"), "stolen");
-    symlinkSync(
-      join(outside, "secret"),
-      join(root, "alpha", "references", "escape"),
-    );
-    const manager = new SkillManager({ roots: { workspace: root } });
-    expect(await manager.loadFile("alpha", "references/guide.txt")).toBe(
-      "guide",
-    );
-    await expect(manager.loadFile("alpha", "../SKILL.md")).rejects.toThrow(
-      /path|traversal/i,
-    );
-    await expect(
-      manager.loadFile("alpha", "references/escape"),
-    ).rejects.toThrow(/escape|symlink/i);
-  });
+  it.skipIf(!symlinksAvailable)(
+    "loads supporting files explicitly and blocks traversal and symlink escapes",
+    async () => {
+      const root = temp(),
+        outside = temp();
+      put(root, "alpha", doc("alpha"), { "references/guide.txt": "guide" });
+      writeFileSync(join(outside, "secret"), "stolen");
+      symlinkSync(
+        join(outside, "secret"),
+        join(root, "alpha", "references", "escape"),
+      );
+      const manager = new SkillManager({ roots: { workspace: root } });
+      expect(await manager.loadFile("alpha", "references/guide.txt")).toBe(
+        "guide",
+      );
+      await expect(manager.loadFile("alpha", "../SKILL.md")).rejects.toThrow(
+        /path|traversal/i,
+      );
+      await expect(
+        manager.loadFile("alpha", "references/escape"),
+      ).rejects.toThrow(/escape|symlink/i);
+    },
+  );
 
   it("enforces version/checksum pins and scans suspicious prompt injection", async () => {
     const root = temp();
@@ -185,32 +190,35 @@ describe("SkillManager progressive disclosure", () => {
     await expect(readOnly.create("x", doc("x"))).rejects.toThrow(/controlled/i);
   });
 
-  it("rejects symlinked skill directories, manifests, supporting files, and controlled roots", async () => {
-    const root = temp(),
-      outside = temp();
-    put(outside, "alpha", doc("alpha"));
-    symlinkSync(join(outside, "alpha"), join(root, "alpha"));
-    expect(
-      await new SkillManager({ roots: { workspace: root } }).discover(),
-    ).toEqual([]);
-    rmSync(join(root, "alpha"));
-    mkdirSync(join(root, "alpha"));
-    symlinkSync(
-      join(outside, "alpha", "SKILL.md"),
-      join(root, "alpha", "SKILL.md"),
-    );
-    await expect(
-      new SkillManager({ roots: { workspace: root } }).discover(),
-    ).rejects.toThrow(/symlink/i);
-    const link = join(temp(), "linked");
-    symlinkSync(outside, link);
-    await expect(
-      new SkillManager({
-        roots: { workspace: link },
-        controlledRoot: link,
-      }).create("evil", doc("evil")),
-    ).rejects.toThrow(/symlink|root/i);
-  });
+  it.skipIf(!symlinksAvailable)(
+    "rejects symlinked skill directories, manifests, supporting files, and controlled roots",
+    async () => {
+      const root = temp(),
+        outside = temp();
+      put(outside, "alpha", doc("alpha"));
+      symlinkSync(join(outside, "alpha"), join(root, "alpha"));
+      expect(
+        await new SkillManager({ roots: { workspace: root } }).discover(),
+      ).toEqual([]);
+      rmSync(join(root, "alpha"));
+      mkdirSync(join(root, "alpha"));
+      symlinkSync(
+        join(outside, "alpha", "SKILL.md"),
+        join(root, "alpha", "SKILL.md"),
+      );
+      await expect(
+        new SkillManager({ roots: { workspace: root } }).discover(),
+      ).rejects.toThrow(/symlink/i);
+      const link = join(temp(), "linked");
+      symlinkSync(outside, link);
+      await expect(
+        new SkillManager({
+          roots: { workspace: link },
+          controlledRoot: link,
+        }).create("evil", doc("evil")),
+      ).rejects.toThrow(/symlink|root/i);
+    },
+  );
 
   it("uses a strict bounded YAML schema and validates readiness names", async () => {
     const root = temp();

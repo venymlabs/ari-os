@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { createConnection } from "node:net";
+import { toIpcPath } from "../platform.js";
 import { getAddress, keccak256, type Address, type Hex } from "viem";
 import type {
   SimulationEvidence,
@@ -720,7 +721,7 @@ export class UnixSignerClient implements IsolatedSigner {
   ) {}
   private request(payload: unknown) {
     return new Promise<any>((resolve, reject) => {
-      const s = createConnection(this.socketPath);
+      const s = createConnection(toIpcPath(this.socketPath));
       let data = "";
       const timer = setTimeout(
         () => s.destroy(Error("signer_timeout")),
