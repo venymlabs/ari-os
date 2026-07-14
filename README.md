@@ -258,14 +258,15 @@ Current acceptance baseline:
 
 ```text
 54 test suites
-392 tests
+400 tests
 3/3 live Robinhood RPC and deployed-bytecode checks
-Strict TypeScript build
+Strict TypeScript build, ESLint, and Prettier gates
+Green on Linux and Windows
 0 known production dependency vulnerabilities
 Clean npm tarball install verified
 ```
 
-The suite includes restart recovery, multi-connection SQLite races, stale-worker fencing, replay attempts, malformed RPC data, tenant isolation, forged approval proofs, exposure oversubscription, package installation, and real subprocess entrypoints.
+The suite includes restart recovery, multi-connection SQLite races, stale-worker fencing, replay attempts, malformed RPC data, tenant isolation, forged approval proofs, exposure oversubscription, allowance-revoke lifecycle and tamper cases, package installation, and real subprocess entrypoints. CI runs the full verify pipeline on Ubuntu and Windows for every push and pull request.
 
 ## Deployment
 
