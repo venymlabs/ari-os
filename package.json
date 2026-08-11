@@ -53,7 +53,7 @@
   },
   "dependencies": {
     "@fastify/cors": "^11.3.0",
-    "fastify": "^5.10.0",
+    "fastify": "^5.11.3",
     "viem": "^2.55.0",
     "yaml": "^2.9.0",
     "zod": "^3.25.76",
