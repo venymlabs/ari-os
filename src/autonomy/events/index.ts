@@ -499,8 +499,15 @@ export class MarketTriggerEngine {
     const p = e.payload as Record<string, unknown>;
     let type: string | undefined;
     const finite = (v: unknown) => typeof v === "number" && Number.isFinite(v);
-    if (e.type === "market.noxa.launch" && p.token === "NOXA")
-      type = "trigger.noxa.launch";
+    // A new token appearing on a launchpad. The event carries the mint that
+    // launched; an event with no identifiable token is not a launch and is
+    // dropped rather than fired on a blank key.
+    if (
+      e.type === "market.token.launch" &&
+      typeof p.token === "string" &&
+      p.token.length > 0
+    )
+      type = "trigger.token.launch";
     else if (
       e.type === "market.liquidity" &&
       finite(p.value) &&

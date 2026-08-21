@@ -1,11 +1,10 @@
 # Third-Party Notices and Provenance
 
-Robinhood Agent OS is MIT licensed. Production dependencies are independently licensed:
+ARI OS is MIT licensed. Production dependencies are independently licensed:
 
 | Package | License | Purpose |
 |---|---|---|
 | Fastify and `@fastify/cors` | MIT | HTTP server and CORS |
-| viem | MIT | EVM RPC/types |
 | `@solana/web3.js` | MIT | Solana RPC/types, transaction wire format |
 | bs58 | MIT | base58 signature and key encoding |
 | yaml | ISC | YAML parsing |

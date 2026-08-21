@@ -1,52 +1,63 @@
 import { describe, expect, it } from "vitest";
-import { robinhoodTestnet } from "../src/chain.js";
 import { normalizeIntent } from "../src/intent.js";
 import { evaluatePolicy } from "../src/policy.js";
 import { AuditJournal } from "../src/audit.js";
+import { pubkey } from "./signer-fixtures.js";
 
-describe("chain configuration", () => {
-  it("pins Robinhood testnet and never silently selects mainnet", () => {
-    expect(robinhoodTestnet.id).toBe(46630);
-    expect(robinhoodTestnet.testnet).toBe(true);
-    expect(robinhoodTestnet.rpcUrls.default.http[0]).toBe(
-      "https://rpc.testnet.chain.robinhood.com",
-    );
-  });
-});
+const IN = pubkey(1),
+  OUT = pubkey(2);
 
 describe("typed intent boundary", () => {
-  it("normalizes a swap without accepting arbitrary calldata", () => {
+  it("normalizes a swap without accepting arbitrary instruction data", () => {
     const intent = normalizeIntent({
       kind: "swap",
-      tokenIn: "0x0000000000000000000000000000000000000001",
-      tokenOut: "0x0000000000000000000000000000000000000002",
+      tokenIn: IN,
+      tokenOut: OUT,
       amountIn: "100",
       maxSlippageBps: 100,
       expiresAt: 2000,
     });
     expect(intent.kind).toBe("swap");
-    expect("calldata" in intent).toBe(false);
+    expect("instructions" in intent).toBe(false);
   });
   it("rejects unknown transaction fields", () => {
     expect(() =>
       normalizeIntent({
         kind: "swap",
-        tokenIn: "0x0000000000000000000000000000000000000001",
-        tokenOut: "0x0000000000000000000000000000000000000002",
+        tokenIn: IN,
+        tokenOut: OUT,
         amountIn: "100",
         maxSlippageBps: 100,
         expiresAt: 2000,
-        calldata: "0xdeadbeef",
+        instructions: [{ programId: OUT, data: "deadbeef" }],
       }),
     ).toThrow();
+  });
+  it("rejects anything that is not a base58 mint, case included", () => {
+    for (const bad of [
+      "0x0000000000000000000000000000000000000001",
+      IN.toLowerCase() === IN ? IN.toUpperCase() : IN.toLowerCase(),
+      `${IN}0`,
+      "",
+    ])
+      expect(() =>
+        normalizeIntent({
+          kind: "swap",
+          tokenIn: bad,
+          tokenOut: OUT,
+          amountIn: "100",
+          maxSlippageBps: 100,
+          expiresAt: 2000,
+        }),
+      ).toThrow();
   });
 });
 
 describe("deny-by-default policy", () => {
   const intent = {
     kind: "swap" as const,
-    tokenIn: "0x0000000000000000000000000000000000000001" as const,
-    tokenOut: "0x0000000000000000000000000000000000000002" as const,
+    tokenIn: IN,
+    tokenOut: OUT,
     amountIn: 100n,
     maxSlippageBps: 100,
     expiresAt: 2000,
@@ -72,6 +83,15 @@ describe("deny-by-default policy", () => {
         },
       ).allowed,
     ).toBe(false));
+  it("refuses a mint that is not on the allowlist", () =>
+    expect(
+      evaluatePolicy(intent, {
+        now: 1000,
+        maxAmountIn: 100n,
+        maxSlippageBps: 100,
+        allowedTokens: new Set([intent.tokenIn]),
+      }).reasons,
+    ).toEqual(["token_out_not_allowed"]));
 });
 
 describe("tamper-evident audit", () =>

@@ -4,22 +4,22 @@
 
 ### A standalone operating system for autonomous onchain agents
 
-ARI OS gives an AI agent memory, tools, durable jobs, market intelligence, approval workflows, and a hardened execution boundary. It is built for Robinhood Chain, runs independently of any agent framework, and ships with a CLI, HTTP API, Telegram adapter, worker, and NOXA indexer.
+ARI OS gives an AI agent memory, tools, durable jobs, market intelligence, approval workflows, and a hardened execution boundary. It is built for Solana, runs independently of any agent framework, and ships with a CLI, HTTP API, Telegram adapter, worker, and operator console.
 
 [Website](https://ari-os-site.vercel.app) · [Architecture](#how-it-fits-together) · [Quickstart](#quickstart) · [Security](#the-security-boundary) · [Operations](docs/OPERATIONS.md)
 
 </div>
 
 > [!IMPORTANT]
-> ARI OS supports funded Robinhood Chain mainnet execution through an isolated, policy-constrained signer. Live mode is triple-opt-in and is not safe by default: verify the build, audit policy and contract addresses, use a dedicated minimally funded wallet, and follow the [trading runbook](docs/TRADING.md). Passing tests is not a security audit.
+> ARI OS supports funded Solana mainnet-beta execution through an isolated, policy-constrained signer. Live mode is triple-opt-in and is not safe by default: verify the build, audit the signer policy and every program ID it allows, use a dedicated minimally funded wallet, and follow the [trading runbook](docs/TRADING.md). Passing tests is not a security audit.
 
-Production quick start: verify the clone, run `npm run setup:trading -- --account <address> --rpc <url>`, create the keystore with `npm run signer -- create`, then configure the signer, approval keys, API, and recovery loop exactly as described in the [trading runbook](docs/TRADING.md). Supported lifecycle commands include `trade quote`, `buy`/`sell`, `revoke`, `approve`/`deny`, `submit`, `status`, and `reconcile`. Allowance revokes flow through the same exact-transaction approval and isolated-signer pipeline as swaps.
+Production quick start: verify the clone, run `npm run setup:trading -- --account <pubkey> --rpc <url>`, create the keystore with `npm run signer -- create`, then configure the signer, approval keys, API, and recovery loop exactly as described in the [trading runbook](docs/TRADING.md). Supported lifecycle commands include `trade quote`, `buy`/`sell`, `revoke`, `approve`/`deny`, `submit`, `status`, and `reconcile`. Delegate revokes flow through the same exact-transaction approval and isolated-signer pipeline as swaps.
 
 ## Why ARI OS exists
 
 Most trading agents are a prompt wrapped around an RPC client. That is fine for a demo. It is a bad place to put capital.
 
-ARI OS treats the model as an untrusted planner. The host owns identity, capabilities, policy, persistence, simulation, approvals, and execution authorization. The model can ask for a typed action; it cannot invent permissions, redirect replies, access a key, or smuggle arbitrary calldata past the control plane.
+ARI OS treats the model as an untrusted planner. The host owns identity, capabilities, policy, persistence, simulation, approvals, and execution authorization. The model can ask for a typed action; it cannot invent permissions, redirect replies, access a key, or smuggle an unpinned instruction past the control plane.
 
 The result is an agent runtime that can stay online, recover after a crash, process market events, and explain what it wants to do without becoming the custodian of the wallet it is meant to protect.
 
@@ -30,15 +30,30 @@ The result is an agent runtime that can stay online, recover after a crash, proc
 | Agent runtime | Provider-neutral model routing, fallback policies, bounded tool loops, cancellation, budgets |
 | Cognition | Durable memory, skills, session history, FTS search, context compression |
 | Autonomy | SQLite job queue, cron schedules, leases, fencing, retries, dead letters, event triggers |
-| Market data | Robinhood Chain primitives, Uniswap V3 analytics, OHLCV, NOXA discovery and indexing |
-| Risk | Exposure, concentration, drawdown, slippage, liquidity, oracle and sequencer checks |
-| Controls | Deterministic policy kernel, durable reservations, exact-transaction approvals |
-| Simulation | Pinned-block JSON-RPC simulation with provenance and evidence hashing |
+| Market data | Cluster reads, Jupiter quoting, exact rational OHLCV aggregation |
+| Risk | Exposure, concentration, drawdown, slippage, liquidity and oracle checks |
+| Controls | Deterministic policy kernel, durable input-leg reservations, exact-transaction approvals |
+| Simulation | `simulateTransaction` against a pinned recent blockhash, with provenance and evidence hashing |
 | Authorization | One-time envelopes bound to transaction, recent blockhash, policy, approval, and simulation |
+| Swaps | Jupiter quote to simulation to approval to authorization to isolated signer, end to end |
+| Perps and pools | Drift v2 and Meteora DLMM adapters plus a pump.fun bonding-curve client — read the caveat below |
 | Interfaces | Authenticated Fastify API, resumable SSE, local/remote CLI, Telegram long polling |
 | Extensibility | Signed plugin manifests, capability mediation, isolated plugin workers |
 | Console | Self-served operator dashboard on the daemon's own origin, strict CSP, session auth |
 | Operations | Health, metrics, audit roots, Docker, Compose, systemd units, migration tools |
+
+> [!WARNING]
+> **What "included" means for perps and pools.** The `perps_*`, `pools_*` and
+> `pumpfun_*` toolsets are implemented and unit-tested against fakes, but they
+> **have never run against live Drift or Meteora infrastructure**. `@drift-labs/sdk`
+> and `@meteora-ag/dlmm` are *optional* peer dependencies, so a default install
+> does not even have them on disk. They also do not mount without a
+> `WalletProvider`, and the composition root deliberately supplies none: the
+> isolated signer takes an authorization envelope rather than raw bytes, and the
+> bridge from one to the other does not exist yet. In the shipped daemon these
+> tools are therefore **not registered and not reachable** — the correct default
+> for an unproven venue, not an oversight. The swap path is the one wired end to
+> end.
 
 ## How it fits together
 
@@ -49,9 +64,10 @@ flowchart LR
     R --> M[Model providers]
     R --> T[Capability-aware tools]
 
-    T --> D[Market data + NOXA index]
-    T --> S[RPC simulation]
+    T --> D[Market data + Jupiter quotes]
+    T --> S[simulateTransaction]
     T --> K[Risk + policy kernel]
+    T -. unmounted: no signer bridge .-> V[Perps / DLMM / curve venues]
 
     J[Durable jobs + event bus] --> R
     C[Memory + skills + sessions] <--> R
@@ -59,9 +75,10 @@ flowchart LR
     S --> A[Approval engine]
     K --> A
     A --> E[Authorization envelope]
-    E -. external boundary .-> X[Isolated signer / broadcaster]
+    E -. process boundary .-> X[Isolated signer / broadcaster]
 
     style X stroke-dasharray: 5 5
+    style V stroke-dasharray: 5 5
 ```
 
 The dashed edge matters. The shipped `raos-signer` process owns the encrypted keystore outside the API/model process. It independently decodes the transaction, verifies policy and authorization claims, rechecks that the recent blockhash has not expired, and atomically consumes the one-time envelope before signing and broadcasting. Blockhash expiry is terminal: an expired request fails closed and needs a fresh authorization, never a silent re-sign.
@@ -131,18 +148,25 @@ Every command returns a stable JSON envelope:
 
 If a dependency is missing, ARI OS says so. It does not substitute plausible empty market data or synthetic simulation results.
 
-## Configure chain access
+## Configure cluster access
 
 RPC-backed tools remain unavailable until an RPC endpoint is configured.
 
 ```bash
-export RPC_URL="https://your-robinhood-testnet-rpc.example"
-export CHAIN_ID=46630
-export NOXA_FACTORY_ADDRESS="0xD9eC2db5f3D1b236843925949fe5bd8a3836FCcB"
-export NOXA_FACTORY_START_BLOCK=0
+export RPC_URL="https://your-devnet-rpc.example"
 ```
 
-ARI OS verifies the configured chain identity. A mismatched chain ID fails startup rather than quietly querying the wrong network.
+The cluster is **derived from `NETWORK`**, never configured beside it: `mainnet`
+selects `mainnet-beta`, `testnet` selects `devnet` — the cluster operators
+actually rehearse on, since Solana's own testnet is a validator-release cluster.
+There is no separate cluster variable to fall out of step with the network, and
+no chain id.
+
+At startup ARI OS calls `getGenesisHash` and compares it with the expected hash
+for that cluster. An endpoint that answers but reports a different cluster — a
+devnet URL left in a mainnet deployment — is reported **unhealthy** and the
+process never becomes ready. An unrecognised genesis hash is unhealthy too:
+unknown is not a pass.
 
 Mainnet cannot be selected accidentally. It requires both flags:
 
@@ -175,7 +199,7 @@ The standalone server provides:
 | `GET /v1/runs/:id/events` | Resume run events over SSE | Scoped bearer token |
 | `POST /v1/trading/quote` | Quote and pin an exact simulated transaction | `trading:quote` |
 | `POST /v1/trading/execute` | Create an idempotent dry-run/live execution | `trading:execute` |
-| `POST /v1/trading/revoke` | Create an idempotent allowance-revoke execution | `trading:execute` |
+| `POST /v1/trading/revoke` | Create an idempotent SPL delegate-revoke execution | `trading:execute` |
 | `GET /v1/trading/executions/:id` | Read durable execution/approval state | `trading:read` |
 | `POST /v1/trading/executions/:id/approve` | Submit operator approval proof | `trading:approve` |
 | `POST /v1/trading/executions/:id/submit` | Authorize, sign, and broadcast | `trading:submit` |
@@ -238,7 +262,7 @@ npm run telegram
 
 ARI OS identifies Telegram actors by numeric user and chat IDs, never usernames. An empty allowlist permits nobody.
 
-## Durable workers and indexing
+## Durable workers
 
 ```bash
 # Apply/check local SQLite state
@@ -248,9 +272,6 @@ npm run db:integrity
 
 # Process one durable job
 npm run worker -- --once
-
-# Index one confirmed NOXA range (requires RPC_URL)
-npm run indexer -- --once
 ```
 
 Jobs use leases and fencing tokens. Events are ordered per consumer. Retries are bounded, poison work is dead-lettered, and unfinished state survives process restarts.
@@ -259,7 +280,7 @@ Do not horizontally scale SQLite writers against the same data directory. Use on
 
 ## The security boundary
 
-ARI OS assumes model output, plugins, RPC responses, token metadata, indexers, and chat input may be malicious.
+ARI OS assumes model output, plugins, RPC responses, token metadata, quote providers, and chat input may be malicious.
 
 Controls are independent by design:
 
@@ -269,7 +290,7 @@ Controls are independent by design:
 - Reservations count pending exposure before another trade can pass policy.
 - Approvals bind authenticated operators to an exact transaction and simulation.
 - Authorization envelopes are short-lived, one-time, and replay protected.
-- The isolated signer rechecks transaction fields, policy, authorization, replay state, and recent-blockhash expiry.
+- The isolated signer rechecks program IDs, instruction discriminators, per-asset input-leg caps, cluster, authorization, replay state, and recent-blockhash expiry.
 - Audit events are append-only and can be anchored with Merkle roots.
 - Missing or unhealthy dependencies fail closed.
 
@@ -277,7 +298,7 @@ Controls are independent by design:
 
 - It is not a general-purpose wallet; the signer is a narrow policy-constrained execution boundary.
 - It does not make smart contracts safe.
-- It does not remove oracle, sequencer, MEV, bridge, governance, or chain risk.
+- It does not remove oracle, validator, MEV, bridge, governance, or cluster risk.
 - Passing tests is not a substitute for an external security audit.
 - Funded execution remains operator-controlled and high risk; deployment requires explicit live opt-ins, exact-transaction approval, and an independently reviewed policy.
 
@@ -297,16 +318,19 @@ npm pack --dry-run       # inspect the release artifact
 Current acceptance baseline:
 
 ```text
-54 test suites
-400 tests
-3/3 live Robinhood RPC and deployed-bytecode checks
+70 test suites
+802 tests (798 pass, 4 skipped on Windows)
 Strict TypeScript build, ESLint, and Prettier gates
 Green on Linux and Windows
 0 known production dependency vulnerabilities
 Clean npm tarball install verified
 ```
 
-The suite includes restart recovery, multi-connection SQLite races, stale-worker fencing, replay attempts, malformed RPC data, tenant isolation, forged approval proofs, exposure oversubscription, allowance-revoke lifecycle and tamper cases, package installation, and real subprocess entrypoints. CI runs the full verify pipeline on Ubuntu and Windows for every push and pull request.
+All of it runs offline, against fakes and local SQLite. **No test touches a live
+cluster**, so a green suite says the logic holds — not that the venue
+integrations work.
+
+The suite includes restart recovery, multi-connection SQLite races, stale-worker fencing, replay attempts, malformed RPC data, tenant isolation, forged approval proofs, exposure oversubscription, delegate-revoke lifecycle and tamper cases, package installation, and real subprocess entrypoints. CI runs the full verify pipeline on Ubuntu and Windows for every push and pull request.
 
 ## Deployment
 
@@ -326,11 +350,15 @@ src/
 ├── agent/          model routing, runtime, tool registry
 ├── autonomy/       jobs, schedules, event bus, delegation
 ├── cognition/      memory, skills, context compression
+├── chains/solana/  RPC, Jupiter, broadcaster, local wallet, SPL
 ├── execution/      policy, approvals, simulation, authorization
 ├── gateway/        protocol, API, channel adapters
-├── indexers/       reorg-aware NOXA indexing
-├── market/         Uniswap V3 and OHLCV analytics
+├── kernel/         trade gateway, policy engine, reconciler, durable store
+├── live-trading/   the durable swap lifecycle and the signer client
+├── market/         exact rational OHLCV aggregation
 ├── observability/  logs, metrics, health, audit roots
+├── perps/          venue-agnostic perps port + Drift v2 adapter
+├── pools/          Meteora DLMM, rebalancer, pump.fun bonding curve
 ├── plugins/        signed manifests and sandbox host
 ├── storage/        durable SQLite stores
 ├── telegram/       polling and offset management
@@ -346,8 +374,7 @@ Deeper references:
 - [Security doctrine](docs/SECURITY.md)
 - [Operator runbook](docs/OPERATIONS.md)
 - [Production trading runbook](docs/TRADING.md)
-- [Production contracts and RPC behavior](docs/PRODUCTION-CONTRACTS.md)
-- [Research notes](docs/RESEARCH.md)
+- [Solana unification plan](docs/plans/2026-08-21-solana-unification.md)
 - [Third-party notices](THIRD_PARTY_NOTICES.md)
 
 ## Contributing

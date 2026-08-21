@@ -1,11 +1,25 @@
 import { chmodSync, lstatSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
-import { getAddress, type Address } from "viem";
 import { z } from "zod";
-import { NOXA_FACTORY_ADDRESS, NOXA_FACTORY_START_BLOCK } from "../noxa.js";
 import { permissionsAreUnsafe } from "../platform.js";
 import { isPublicKey } from "../signer/transaction.js";
+
+/**
+ * The Solana cluster each network name selects.
+ *
+ * `testnet` maps to `devnet` because that is the cluster operators actually
+ * rehearse on — Solana's own `testnet` is a validator-release cluster, not a
+ * staging network. The cluster is derived, never configured: an operator who
+ * could name the cluster independently of `NETWORK` could point a `mainnet`
+ * process at devnet, or the reverse.
+ */
+export const CLUSTER_FOR_NETWORK = {
+  mainnet: "mainnet-beta",
+  testnet: "devnet",
+} as const;
+export type Cluster =
+  (typeof CLUSTER_FOR_NETWORK)[keyof typeof CLUSTER_FOR_NETWORK];
 const boolean = z.enum(["true", "false"]).transform((v) => v === "true");
 const url = z
   .string()
@@ -35,9 +49,6 @@ const schema = z
     SHUTDOWN_TIMEOUT_MS: z.coerce.number().int().positive().default(30000),
     UNSAFE_ALLOW_EXTERNAL_DATABASES: boolean.default("false"),
     RPC_URL: url.optional(),
-    CHAIN_ID: z.coerce.number().int().positive().optional(),
-    NOXA_FACTORY_ADDRESS: z.string().optional(),
-    NOXA_FACTORY_START_BLOCK: z.coerce.bigint().nonnegative().optional(),
     MARKET_PROVIDER_URLS: z.string().optional(),
     API_BEARER_TOKEN: z.string().min(1).optional(),
     API_BEARER_TOKEN_SHA256: z
@@ -64,7 +75,6 @@ const schema = z
       .min(0)
       .max(10000)
       .default(100),
-    TRADING_FINALITY_BLOCKS: z.coerce.number().int().positive().default(12),
     TRADING_RECONCILE_INTERVAL_MS: z.coerce
       .number()
       .int()
@@ -74,23 +84,15 @@ const schema = z
   })
   .passthrough();
 export interface TradingConfig {
-  /**
-   * The signing wallet. Accepts a base58 Ed25519 public key (Solana) or a
-   * checksummed EVM address; the rest of this module is the last EVM-shaped
-   * surface in the tree and is retired with `src/chain.ts` and `src/noxa.ts`.
-   */
+  /** The signing wallet: a base58 Ed25519 public key. */
   account: string;
-  router: Address;
-  quoter: Address;
-  factory: Address;
   signerSocketPath?: string;
   signerTokenPath?: string;
   signerPolicyPath?: string;
   maxAmountIn: bigint;
-  /** Tradeable assets: base58 mints, or EVM token addresses. */
+  /** Tradeable assets, as base58 mints. */
   allowedTokens: string[];
   maxSlippageBps: number;
-  finalityBlocks: number;
   reconcileIntervalMs: number;
   liveEnabled: boolean;
   approvalOperators?: { id: string; keyId: string; keyPath: string }[];
@@ -113,9 +115,8 @@ export interface AppConfig {
     tenantId: string;
     scopes: string[];
   };
-  rpc?: { url: string; chainId: number };
+  rpc?: { url: string; cluster: Cluster };
   trading?: TradingConfig;
-  noxa: { factoryAddress: `0x${string}`; startBlock: bigint };
   marketProviderUrls: string[];
   paths: {
     sessions: string;
@@ -123,7 +124,6 @@ export interface AppConfig {
     jobs: string;
     events: string;
     triggers: string;
-    indexer: string;
     memory: string;
     skills: string;
     logs: string;
@@ -133,24 +133,17 @@ export interface AppConfig {
     reservations: string;
   };
 }
-const address = (v: string, n: string) => {
-  try {
-    return getAddress(v);
-  } catch {
-    throw Error(`${n} is invalid`);
-  }
-};
 /**
- * A wallet or asset identifier on either chain family.
+ * A wallet or asset identifier: a base58 Ed25519 public key, verbatim.
  *
- * base58 Solana public keys pass through verbatim (case is significant — two
- * keys differing only in case are two different wallets); anything else must be
- * a checksummable EVM address. Accepting both is what lets the Solana execution
- * path be configured while `NOXA_*`, `CHAIN_ID` and the EVM read surface are
- * still shipped.
+ * Case is significant — two keys differing only in case are two different
+ * wallets — so nothing here normalizes, lowercases, or checksums. The value
+ * either decodes to 32 bytes on the Ed25519 curve or it is refused.
  */
-const walletOrAsset = (v: string, n: string) =>
-  isPublicKey(v) ? v : address(v, n);
+const walletOrAsset = (v: string, n: string) => {
+  if (!isPublicKey(v)) throw Error(`${n} is not a base58 public key`);
+  return v;
+};
 const privateFile = (p: string, n: string) => {
   if (!isAbsolute(p)) throw Error(`${n} must be absolute`);
   const s = lstatSync(p);
@@ -199,13 +192,7 @@ export function loadConfig(
     )
   )
     throw Error("Live mainnet requires explicit triple opt-in");
-  const expected = e.NETWORK === "mainnet" ? 4663 : 46630,
-    chainId = e.CHAIN_ID ?? expected;
-  if (chainId !== expected) throw Error(`CHAIN_ID does not match ${e.NETWORK}`);
-  const factoryAddress = address(
-    e.NOXA_FACTORY_ADDRESS ?? NOXA_FACTORY_ADDRESS,
-    "NOXA_FACTORY_ADDRESS",
-  );
+  const cluster = CLUSTER_FOR_NETWORK[e.NETWORK];
   const root = resolve(data);
   mkdirSync(root, { recursive: true, mode: 0o700 });
   chmodSync(root, 0o700);
@@ -214,14 +201,9 @@ export function loadConfig(
   let trading: TradingConfig | undefined;
   if (tradingConfigured) {
     if (e.NETWORK !== "mainnet")
-      throw Error("Trading contracts are only verified on mainnet");
+      throw Error("Trading is only supported on mainnet-beta");
     if (!e.TRADING_ACCOUNT || !e.TRADING_MAX_AMOUNT_IN)
       throw Error("TRADING_ACCOUNT and TRADING_MAX_AMOUNT_IN are required");
-    const contracts = {
-      router: "0xcaf681a66d020601342297493863e78c959e5cb2",
-      quoter: "0x33e885ed0ec9bf04ecfb19341582aadcb4c8a9e7",
-      factory: "0x1f7d7550b1b028f7571e69a784071f0205fd2efa",
-    };
     if (e.EXECUTION_MODE === "live") {
       for (const [p, n] of [
         [e.SIGNER_TOKEN_PATH, "SIGNER_TOKEN_PATH"],
@@ -255,9 +237,6 @@ export function loadConfig(
     if (!e.RPC_URL) throw Error("RPC_URL is required");
     trading = {
       account: walletOrAsset(e.TRADING_ACCOUNT, "TRADING_ACCOUNT"),
-      router: address(contracts.router, "router"),
-      quoter: address(contracts.quoter, "quoter"),
-      factory: address(contracts.factory, "factory"),
       ...(e.SIGNER_SOCKET_PATH
         ? { signerSocketPath: e.SIGNER_SOCKET_PATH }
         : {}),
@@ -270,7 +249,6 @@ export function loadConfig(
         e.TRADING_ALLOWED_TOKENS?.split(",").filter(Boolean) ?? []
       ).map((x) => walletOrAsset(x, "TRADING_ALLOWED_TOKENS")),
       maxSlippageBps: e.TRADING_MAX_SLIPPAGE_BPS,
-      finalityBlocks: e.TRADING_FINALITY_BLOCKS,
       reconcileIntervalMs: e.TRADING_RECONCILE_INTERVAL_MS,
       liveEnabled: e.EXECUTION_MODE === "live",
       ...(e.APPROVAL_OPERATOR_IDS
@@ -312,12 +290,8 @@ export function loadConfig(
         .map((x) => x.trim())
         .filter(Boolean),
     },
-    ...(e.RPC_URL ? { rpc: { url: e.RPC_URL, chainId } } : {}),
+    ...(e.RPC_URL ? { rpc: { url: e.RPC_URL, cluster } } : {}),
     ...(trading ? { trading } : {}),
-    noxa: {
-      factoryAddress,
-      startBlock: e.NOXA_FACTORY_START_BLOCK ?? NOXA_FACTORY_START_BLOCK,
-    },
     marketProviderUrls,
     paths: {
       sessions: join(root, "sessions.sqlite"),
@@ -325,7 +299,6 @@ export function loadConfig(
       jobs: join(root, "jobs.sqlite"),
       events: join(root, "events.sqlite"),
       triggers: join(root, "triggers.sqlite"),
-      indexer: join(root, "indexer.sqlite"),
       memory: join(root, "memory"),
       skills: join(root, "skills"),
       logs: join(root, "logs"),
@@ -346,8 +319,8 @@ export function sanitizedConfig(c: AppConfig) {
     dataDir: c.dataDir,
     logLevel: c.logLevel,
     rpcConfigured: !!c.rpc,
+    cluster: c.rpc?.cluster ?? null,
     marketProvidersConfigured: c.marketProviderUrls.length,
-    noxa: { factoryConfigured: true, startBlock: c.noxa.startBlock.toString() },
     ...(c.trading
       ? {
           trading: {
@@ -356,7 +329,6 @@ export function sanitizedConfig(c: AppConfig) {
             maxAmountIn: c.trading.maxAmountIn.toString(),
             allowedTokens: c.trading.allowedTokens,
             maxSlippageBps: c.trading.maxSlippageBps,
-            finalityBlocks: c.trading.finalityBlocks,
           },
         }
       : {}),

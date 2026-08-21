@@ -23,10 +23,6 @@ type MarketDeps = {
 };
 export interface BuiltInDependencies {
   market?: MarketDeps;
-  noxa?: {
-    launches?: (limit: number) => Promise<unknown>;
-    verify?: (address: string) => Promise<unknown>;
-  };
   risk?: { analyze?: (input: unknown) => unknown };
   simulation?: { simulate?: (input: any) => Promise<unknown> };
   /**
@@ -142,18 +138,6 @@ export function registerBuiltInTools(
     }),
     d.market?.holders &&
       ((x) => d.market!.holders!(x.network, x.token, x.limit)),
-  );
-  reg(
-    "noxa.launches",
-    "Read NOXA launches",
-    z.object({ limit: z.number().int().min(1).max(100).default(50) }),
-    d.noxa?.launches && ((x) => d.noxa!.launches!(x.limit)),
-  );
-  reg(
-    "noxa.verify-token",
-    "Verify NOXA token",
-    z.object({ address: z.string().min(2) }),
-    d.noxa?.verify && ((x) => d.noxa!.verify!(x.address)),
   );
   reg(
     "risk.analyze",

@@ -1,13 +1,46 @@
-import { rational, type Rational } from "./uniswap-v3.js";
+/**
+ * An exact price, kept as a reduced fraction.
+ *
+ * Candles are aggregated in integer arithmetic end to end: a mid price of one
+ * base unit against another has no exact float representation, and rounding at
+ * aggregation time would make the open/high/low/close of a bucket depend on the
+ * order the trades arrived in.
+ */
+export interface Rational {
+  numerator: bigint;
+  denominator: bigint;
+}
+const abs = (x: bigint) => (x < 0n ? -x : x);
+const gcd = (a: bigint, b: bigint): bigint => {
+  a = abs(a);
+  b = abs(b);
+  while (b) {
+    [a, b] = [b, a % b];
+  }
+  return a;
+};
+/** Reduces to lowest terms so equal prices compare equal by value. */
+export function rational(n: bigint, d: bigint): Rational {
+  if (d <= 0n) throw new RangeError("denominator must be positive");
+  const g = gcd(n, d);
+  return { numerator: n / g, denominator: d / g };
+}
 
+/**
+ * One executed trade on a pair.
+ *
+ * `slot` and `sequence` are the deterministic tie-break for trades sharing a
+ * timestamp: the cluster slot the trade landed in, then its position within
+ * that slot.
+ */
 export interface MarketTrade {
   id: string;
   timestamp: number;
   price: Rational;
   baseAmount: bigint;
   quoteAmount: bigint;
-  blockNumber: bigint;
-  logIndex: number;
+  slot: bigint;
+  sequence: number;
 }
 export interface Candle {
   start: number;
@@ -42,9 +75,8 @@ export function aggregateCandles(
     .sort((a, b) => {
       const time = a.timestamp - b.timestamp;
       if (time) return time;
-      if (a.blockNumber !== b.blockNumber)
-        return a.blockNumber < b.blockNumber ? -1 : 1;
-      return a.logIndex - b.logIndex || a.id.localeCompare(b.id);
+      if (a.slot !== b.slot) return a.slot < b.slot ? -1 : 1;
+      return a.sequence - b.sequence || a.id.localeCompare(b.id);
     });
   const out: Candle[] = [];
   for (const t of trades) {

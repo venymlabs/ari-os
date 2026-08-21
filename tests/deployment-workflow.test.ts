@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { pubkey } from "./signer-fixtures.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 const execFileAsync = promisify(execFile);
@@ -74,7 +75,7 @@ describe("clone-to-trade deployment", () => {
         env: {
           ...process.env,
           RPC_URL: "https://rpc.example",
-          TRADING_ACCOUNT: "0x0000000000000000000000000000000000000001",
+          TRADING_ACCOUNT: pubkey(1),
           TRADING_MAX_AMOUNT_IN: "1",
           API_BEARER_TOKEN_SHA256:
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -92,7 +93,14 @@ describe("clone-to-trade deployment", () => {
       ])
         expect(stdout).toContain(value);
       expect(stdout).not.toContain("host.docker.internal");
+      // The NOXA indexer service is gone with the launchpad it indexed.
+      expect(stdout).not.toContain("indexer");
+      // No chain id: the cluster is derived from NETWORK, not configured.
+      expect(stdout).not.toContain("CHAIN_ID");
     },
+    // Two `docker compose config` round-trips. The 5s default is not enough
+    // for a cold daemon under a loaded suite.
+    60000,
   );
   it("ships setup and reconcile operator scripts plus ordered hardened systemd units", async () => {
     const pkg = JSON.parse(await readFile("package.json", "utf8"));

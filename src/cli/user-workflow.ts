@@ -1,7 +1,6 @@
 import { createHmac, randomBytes, randomUUID } from "node:crypto";
 import { chmod, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { getAddress } from "viem";
 import type { UserRequest } from "./index.js";
 import type { DecisionInput } from "../execution/approvals/index.js";
 import type { TradeSide, TradingOrchestrator } from "../live-trading/index.js";
@@ -224,13 +223,19 @@ export function createUserWorkflow(c: C) {
     if (req.group === "portfolio") {
       if (c.trading?.portfolio) return c.trading.portfolio();
       if (!c.rpc) throw Error("trading service or RPC not configured");
-      const address = getAddress(required(req.args, "address"));
-      return {
+      const address = mint(required(req.args, "address"), "address");
+      // `getBalance` answers in lamports, wrapped in an RPC context envelope.
+      // Read only `value`, and read it as a bigint: lamport balances exceed
+      // Number.MAX_SAFE_INTEGER above ~9M SOL.
+      const balance = (await c.rpc("getBalance", [
         address,
-        nativeBalance: BigInt(
-          await c.rpc("eth_getBalance", [address, "latest"]),
-        ).toString(),
-      };
+        { commitment: "confirmed" },
+      ])) as { value?: number | string } | number | string;
+      const lamports =
+        typeof balance === "object" && balance !== null
+          ? (balance.value ?? 0)
+          : balance;
+      return { address, nativeBalance: BigInt(lamports).toString() };
     }
     if (!c.trading) throw Error("trading service not configured");
     const a = req.args;

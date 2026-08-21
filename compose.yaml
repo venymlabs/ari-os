@@ -31,7 +31,6 @@ services:
       NODE_ENV: production
       RPC_URL: "${RPC_URL:?RPC_URL must be set}"
       NETWORK: "${NETWORK:-mainnet}"
-      CHAIN_ID: "${CHAIN_ID:-4663}"
       EXECUTION_MODE: "${EXECUTION_MODE:-dry-run}"
       TRADING_ACCOUNT: "${TRADING_ACCOUNT:?TRADING_ACCOUNT must be set}"
       TRADING_MAX_AMOUNT_IN: "${TRADING_MAX_AMOUNT_IN:?TRADING_MAX_AMOUNT_IN must be set}"
@@ -54,11 +53,6 @@ services:
   worker:
     <<: *raos
     command: ["npm","run","worker"]
-    profiles: [workers]
-    volumes: [raos-data:/var/lib/raos]
-  indexer:
-    <<: *raos
-    command: ["npm","run","indexer"]
     profiles: [workers]
     volumes: [raos-data:/var/lib/raos]
   telegram:

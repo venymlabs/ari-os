@@ -119,7 +119,6 @@ function liveEnv(d: string) {
     NODE_ENV: "test",
     DATA_DIR: d,
     NETWORK: "mainnet",
-    CHAIN_ID: "4663",
     RPC_URL: "http://127.0.0.1:8899",
     EXECUTION_MODE: "live",
     MAINNET_ENABLED: "true",
@@ -138,7 +137,6 @@ function liveEnv(d: string) {
     TRADING_MAX_AMOUNT_IN: "1000",
     TRADING_ALLOWED_TOKENS: `${MINT_IN},${MINT_OUT}`,
     TRADING_MAX_SLIPPAGE_BPS: "100",
-    TRADING_FINALITY_BLOCKS: "2",
     API_BEARER_TOKEN: "api",
     API_SCOPES: "tool:read,tool:invoke,trading:quote,trading:execute",
   } as const;
@@ -226,8 +224,6 @@ function clusterFetch(
       switch (body.method) {
         case "getGenesisHash":
           return GENESIS;
-        case "eth_chainId":
-          return "0x1237";
         case "getBlockHeight":
           return options.blockHeight ?? 10;
         case "getSlot":
@@ -324,7 +320,10 @@ describe("live trading configuration and production composition", () => {
     const now = BigInt(Math.floor(Date.now() / 1000)),
       base = {
         now,
-        chain: 4663n,
+        // The evaluator's numeric chain slot is derived from the CLUSTER now,
+        // not from an EVM chain id: mainnet-beta and devnet fold to different
+        // numbers, and nothing in config names one independently of NETWORK.
+        chain: composition.riskEvaluator!.limits.chains[0]!,
         account: ACCOUNT,
         router: composition.riskEvaluator!.limits.routers[0]!,
         tokenIn: MINT_IN,
@@ -346,6 +345,7 @@ describe("live trading configuration and production composition", () => {
     });
     for (const [change, reason] of [
       [{ amountIn: 1001n }, "per_trade_limit_exceeded"],
+      [{ chain: 4663n }, "chain_not_allowed"],
       [{ router: MINT_OUT }, "router_not_allowed"],
       [{ tokenOut: pubkey(9) }, "token_not_allowed"],
       [{ quoteAt: now - 31n }, "quote_stale"],

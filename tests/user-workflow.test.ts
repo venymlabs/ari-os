@@ -6,6 +6,7 @@ import { createUserWorkflow } from "../src/cli/user-workflow.js";
 import { posixPermissions } from "./helpers.js";
 import { pubkey, TOKEN_PROGRAM } from "./signer-fixtures.js";
 const TOKEN_ACCOUNT = pubkey(10);
+const WALLET = pubkey(11);
 const dirs: string[] = [];
 afterEach(() =>
   Promise.all(
@@ -84,7 +85,8 @@ describe("clone-to-trade workflow", () => {
       dataDir: dir,
       rpc: async (method) => {
         calls++;
-        if (method === "eth_getBalance") return "0x10";
+        // Lamports, in the RPC context envelope Solana wraps balances in.
+        if (method === "getBalance") return { context: { slot: 1 }, value: 16 };
         throw Error("unexpected");
       },
     });
@@ -92,9 +94,17 @@ describe("clone-to-trade workflow", () => {
     const p: any = await user({
       group: "portfolio",
       action: "show",
-      args: { address: "0x0000000000000000000000000000000000000001" },
+      args: { address: WALLET },
     });
     expect(p.nativeBalance).toBe("16");
+    // An EVM address is not a wallet any more, and never reaches the RPC.
+    await expect(
+      user({
+        group: "portfolio",
+        action: "show",
+        args: { address: "0x0000000000000000000000000000000000000001" },
+      }),
+    ).rejects.toThrow(/address/);
     await expect(
       user({
         group: "trade",

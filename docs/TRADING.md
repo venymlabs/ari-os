@@ -51,7 +51,7 @@ Confirm that the address printed by `status` is exactly `TRADING_ACCOUNT`. It is
 
 ## 3. Review the two policies
 
-`policy.json` controls the trading orchestrator. Runtime equivalents are `TRADING_MAX_AMOUNT_IN`, `TRADING_ALLOWED_TOKENS`, and `TRADING_MAX_SLIPPAGE_BPS`. Amounts are base-unit decimal integers; the allowlist is a comma-separated list of base58 mints. `TRADING_MAX_AMOUNT_IN` is enforced independently in each mint's base units; raw units from different mints or decimal scales are never summed. Finality is a commitment level, not a depth: `TRADING_FINALITY_BLOCKS` has no Solana meaning and is ignored — an execution is final when the cluster reports it `finalized`. Aggregate exposure is disabled unless the adapter supplies a single quote denomination with explicit decimals and price/valuation evidence.
+`policy.json` controls the trading orchestrator. Runtime equivalents are `TRADING_MAX_AMOUNT_IN`, `TRADING_ALLOWED_TOKENS`, and `TRADING_MAX_SLIPPAGE_BPS`. Amounts are base-unit decimal integers; the allowlist is a comma-separated list of base58 mints. `TRADING_MAX_AMOUNT_IN` is enforced independently in each mint's base units; raw units from different mints or decimal scales are never summed. Finality is a commitment level, not a depth: there is no confirmation-count setting, because Solana has nothing to count — an execution is final when the cluster reports it `finalized`. Aggregate exposure is disabled unless the adapter supplies a single quote denomination with explicit decimals and price/valuation evidence.
 
 `sign-policy.json` is independently enforced by the signer. It binds the cluster, the allowed fee payers, the allowed program IDs, the allowed instruction discriminators within each program, per-asset spend caps, and the compute-unit/priority-fee ceilings.
 
@@ -102,7 +102,7 @@ A transaction carrying an address lookup table is refused unless that table is p
 
 `discriminator` is the lowercase hex prefix of the instruction data (`0c` is SPL Token `TransferChecked`; `02`/`03` are ComputeBudget `SetComputeUnitLimit`/`SetComputeUnitPrice`). `mintAccountIndex` is the index within that instruction's own account list where the mint appears; the signer verifies it matches `asset` before applying the cap, and refuses if the mint is not verifiable. `caps` and `maxPriorityFeeLamports` are decimal strings of base units, `native` meaning lamports.
 
-Program provenance and current addresses are in [PRODUCTION-CONTRACTS.md](PRODUCTION-CONTRACTS.md). Re-run its live read-only checks before deployment.
+**No program address is codified for you.** ARI OS ships no verified-deployment inventory: the only program IDs in the tree are the SPL Token, Associated Token Account and ComputeBudget system programs, and the addresses the Drift and Meteora adapters take from their own SDKs. Every program you allow in `sign-policy.json` is an address **you** must verify against primary sources, and re-verify before funding. An address copied from this repository, a chat message, or a block explorer search result is not verified provenance.
 
 ## 4. Configure live mode and approval proof keys
 
@@ -113,7 +113,6 @@ Use one stable key ID for each key and keep the signer key ID equal to `AUTHORIZ
 ```bash
 export RPC_URL=https://YOUR_AUTHENTICATED_MAINNET_RPC
 export NETWORK=mainnet
-export CHAIN_ID=4663
 export EXECUTION_MODE=live
 export MAINNET_ENABLED=true
 export MAINNET_ACKNOWLEDGE_RISK=I_ACKNOWLEDGE_MAINNET_RISK
@@ -165,7 +164,7 @@ curl -fsS http://127.0.0.1:8787/livez
 curl -fsS http://127.0.0.1:8787/readyz
 ```
 
-Startup probes the cluster genesis hash and the signer's identity, policy hash and authorization key id; it also recovers/reconciles durable executions and schedules periodic reconciliation. A non-ready service must not receive trading traffic.
+Startup probes the cluster genesis hash and the signer's identity, policy hash and authorization key id; it also recovers/reconciles durable executions and schedules periodic reconciliation. The cluster is derived from `NETWORK` — `mainnet` means `mainnet-beta` — so an RPC endpoint for a different cluster reports `rpc: unhealthy` and readiness never comes up. A non-ready service must not receive trading traffic.
 
 ## 6. Clone-to-trade CLI flow
 
@@ -239,7 +238,7 @@ Use `Authorization: Bearer …` and the corresponding `trading:*` scope. Treat t
 1. Stop API/worker ingress immediately; preserve databases and logs.
 2. Stop the signer to remove signing/broadcast capability: `sudo systemctl stop raos-api raos-worker raos-signer` when using systemd.
 3. Remove network exposure and rotate API/signer/approval/authorization credentials if compromise is suspected. Rotation requires coordinated API and signer configuration.
-4. Revoke router allowances: `trade revoke` when the control plane is still trusted, or a separately trusted wallet when control-plane compromise is possible.
+4. Revoke SPL delegates: `trade revoke` when the control plane is still trusted, or a separately trusted wallet when control-plane compromise is possible.
 5. Restart the signer and one API instance, require `/readyz`, then reconcile every uncertain execution before restoring ingress.
 
 Manual signer-side reconciliation checks its durable broadcast records without signing or resubmitting:
@@ -258,3 +257,9 @@ Compare signature statuses, each record's last valid block height against the cu
 Stop API, workers, and signer. Checkpoint every SQLite WAL, then copy the entire data directory with ownership and modes preserved. Encrypt backups; store the encrypted keystore and its password separately. Never copy only a live `.sqlite` file.
 
 Restore only while all services are stopped. Enforce directory mode 0700 and secret-file mode 0600, run `npm run db:integrity`, start the signer, then one API instance, verify `/readyz`, and reconcile before enabling ingress. A backup is not valid until a restore drill succeeds.
+
+## 10. Aggregate reservation accounting
+
+Aggregate caps use one explicit quote denomination and decimal precision for the entire ledger. `ReservationLedger.reserveWithin` checks every active reservation inside the same `BEGIN IMMEDIATE` transaction; a row with a missing valuation/evidence, a different denomination, or a different precision blocks the new aggregate reservation. Migration rows without valuation therefore fail closed until they expire, are released, or are reconciled. Configure `aggregateQuote` on the ledger to pin the deployment-wide denomination and precision; values in another unit are never treated as a separate bucket.
+
+Per-asset caps need none of this and are always on: they are denominated in the input leg, so no valuation, price feed, or oracle sits in that path.

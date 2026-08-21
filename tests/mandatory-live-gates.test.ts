@@ -8,8 +8,7 @@ import {
   TradingOrchestrator,
 } from "../src/live-trading/index.js";
 import { CLUSTER, pubkey } from "./signer-fixtures.js";
-const A = "0x0000000000000000000000000000000000000001",
-  FEE_PAYER = pubkey(1);
+const FEE_PAYER = pubkey(1);
 function files() {
   const d = mkdtempSync(join(tmpdir(), "gates-"));
   for (const n of ["token", "policy", "approval", "auth"])
@@ -21,14 +20,13 @@ function env(d: string): any {
     NODE_ENV: "test",
     DATA_DIR: d,
     NETWORK: "mainnet",
-    CHAIN_ID: "4663",
     RPC_URL: "http://localhost",
     EXECUTION_MODE: "live",
     MAINNET_ENABLED: "true",
     MAINNET_ACKNOWLEDGE_RISK: "I_ACKNOWLEDGE_MAINNET_RISK",
     LIVE_TRADING_ENABLED: "true",
     LIVE_TRADING_ACKNOWLEDGE_RISK: "I_ACKNOWLEDGE_LIVE_TRADING_RISK",
-    TRADING_ACCOUNT: A,
+    TRADING_ACCOUNT: FEE_PAYER,
     TRADING_MAX_AMOUNT_IN: "10",
     SIGNER_SOCKET_PATH: join(d, "sock"),
     SIGNER_TOKEN_PATH: join(d, "token"),

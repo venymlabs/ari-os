@@ -1,4 +1,4 @@
-import type { AppConfig } from "../config/index.js";
+import { CLUSTER_FOR_NETWORK, type AppConfig } from "../config/index.js";
 import type { ModelProvider } from "../agent/runtime/index.js";
 import { AgentRuntime } from "../agent/runtime/index.js";
 import { ToolRegistry } from "../agent/tools/registry.js";
@@ -17,10 +17,6 @@ import {
   CLUSTER_GENESIS_HASHES,
   RpcSimulator,
 } from "../execution/rpc-simulator.js";
-import { NoxaIndexStore } from "../storage/noxa-index.js";
-import { createNoxaTokenRegistry } from "../noxa.js";
-import { createPublicClient, http, type Address } from "viem";
-import { robinhoodMainnet, robinhoodTestnet } from "../chain.js";
 import { Connection, PublicKey, TransactionInstruction } from "@solana/web3.js";
 import {
   JupiterClient,
@@ -84,18 +80,20 @@ import {
 import { DRIFT_SETTLEMENT_MINT } from "../perps/drift/convert.js";
 
 /**
- * Cluster identity for a configured network.
+ * The numeric slot {@link ProductionRiskEvaluator} reserves for chain identity.
  *
- * `src/config/` is the last module still speaking EVM (numeric chain ids,
- * checksummed addresses); until it is ported, `NETWORK` is the only cluster
- * signal the composition root has. `testnet` maps to `devnet` because that is
- * the cluster operators actually rehearse on — Solana's `testnet` is a
- * validator-release cluster, not a staging network.
+ * Solana's real cluster identity is a base58 genesis hash, which does not fit
+ * the evaluator's `bigint` allowlist, so it is folded into one here: distinct
+ * clusters map to distinct numbers and one cluster always maps to the same
+ * number. This is a local allowlist key, not a protocol constant. The
+ * authoritative cluster checks are the genesis-hash probe in `verify()`, the
+ * `SimulationRequest.cluster` comparison in the risk assessor, and the signer's
+ * own policy `cluster` field, each independent of this one.
  */
-const CLUSTER_FOR_NETWORK = {
-  mainnet: "mainnet-beta",
-  testnet: "devnet",
-} as const;
+const clusterAllowlistId = (cluster: string) =>
+  BigInt(
+    `0x${createHash("sha256").update(`solana:cluster:${cluster}`).digest("hex").slice(0, 16)}`,
+  );
 
 /** How long a quote may be acted on. Matches the documented CLI window. */
 const QUOTE_TTL_MS = 30_000;
@@ -117,8 +115,8 @@ const NATIVE_FEE_RESERVE_LAMPORTS = 3_000_000n;
 /**
  * How far behind the tip a quote's context slot may be. A recent blockhash
  * lives ~150 slots, so a quote older than that describes a transaction that can
- * no longer land. `TRADING_FINALITY_BLOCKS` has no Solana meaning and is not
- * used here — confirmation depth is a commitment level, not a count.
+ * no longer land. There is deliberately no configurable confirmation depth to
+ * pair with this: finality on Solana is a commitment level, not a count.
  */
 const MAX_QUOTE_SLOT_LAG = 150n;
 
@@ -149,7 +147,6 @@ export interface ApplicationHealth {
     runs: DependencyHealth;
     model: DependencyHealth & { provider: string };
     rpc: DependencyHealth;
-    noxa: DependencyHealth;
     simulation: DependencyHealth;
     market: DependencyHealth;
     trading: DependencyHealth;
@@ -481,11 +478,7 @@ export function createTradingComposition(
     );
     const programs = allowedPrograms(t.signerPolicyPath);
     riskEvaluator = new ProductionRiskEvaluator({
-      // Still the config's numeric network id: `src/config/` is the last EVM
-      // surface. What binds a transaction to a cluster on Solana is checked
-      // explicitly below, again by the authorization issuer's `blockhash`
-      // check, and a third time by the signer's own policy `cluster` field.
-      chains: [BigInt(config.rpc.chainId)],
+      chains: [clusterAllowlistId(cluster)],
       accounts: [t.account],
       routers: [ROUTER_UNUSED],
       tokens: t.allowedTokens,
@@ -593,7 +586,7 @@ export function createTradingComposition(
             const alive = blockHeight <= q.lastValidBlockHeight;
             const input: ProductionRiskInput = {
               now,
-              chain: BigInt(config.rpc!.chainId),
+              chain: clusterAllowlistId(cluster),
               account: r.feePayer,
               router: ROUTER_UNUSED,
               tokenIn: q.inputMint,
@@ -940,7 +933,7 @@ export function createApplication(
   let state: "created" | "starting" | "ready" | "stopped" = "created",
     rpcHealthy = !config.rpc,
     tradingHealthy = true;
-  let sessions: SessionStore | undefined, noxaStore: NoxaIndexStore | undefined;
+  let sessions: SessionStore | undefined;
   let reconciliationTimer: NodeJS.Timeout | undefined,
     reconciliationRunning = false;
   const runs = new DurableRunStore(config.paths.runs);
@@ -948,33 +941,14 @@ export function createApplication(
   if (config.rpc) {
     const simulator = new RpcSimulator({
       url: config.rpc.url,
-      cluster: CLUSTER_FOR_NETWORK[config.network],
+      cluster: config.rpc.cluster,
       ...(overrides.rpcFetch ? { fetch: overrides.rpcFetch } : {}),
     });
-    // The NOXA launchpad index is the last EVM-native read surface still
-    // shipped; it is retired with the rest of `src/noxa.ts` and `src/chain.ts`,
-    // not here, so that the tree stays buildable through the migration.
-    const chain =
-      config.network === "mainnet" ? robinhoodMainnet : robinhoodTestnet;
-    const client = createPublicClient({
-      chain,
-      transport: http(config.rpc.url, {
-        fetchOptions: overrides.rpcFetch
-          ? { fetchFn: overrides.rpcFetch }
-          : undefined,
-      } as any),
-    });
-    const noxaRegistry = createNoxaTokenRegistry(client as any);
-    noxaStore = new NoxaIndexStore(config.paths.indexer);
     composed = {
       market: {
         networks: async () => [
-          { id: config.rpc!.chainId, name: config.network },
+          { id: config.rpc!.cluster, name: config.network },
         ],
-      },
-      noxa: {
-        launches: async (limit) => noxaStore!.launches().slice(-limit),
-        verify: async (address) => noxaRegistry.verifyToken(address as Address),
       },
       simulation: { simulate: (input) => simulator.simulate(input) },
     };
@@ -1008,7 +982,6 @@ export function createApplication(
     ...composed,
     ...overrides.tools,
     market: { ...composed.market, ...overrides.tools?.market },
-    noxa: { ...composed.noxa, ...overrides.tools?.noxa },
     ...(venues ? { venues: venues.mounts } : {}),
   });
   const tc = createTradingComposition(config, overrides.rpcFetch);
@@ -1044,6 +1017,13 @@ export function createApplication(
       if (state === "ready") return;
       sessions = new SessionStore(config.paths.sessions);
       if (config.rpc) {
+        // Readiness means "this endpoint is the cluster this process was
+        // configured for", not merely "this endpoint answers". The genesis hash
+        // is the only self-describing cluster identity Solana has, so an
+        // endpoint that responds but reports a different cluster — a devnet URL
+        // left in a mainnet deployment — is unhealthy, exactly as a mismatched
+        // chain id used to be. An endpoint whose hash is unknown to
+        // CLUSTER_GENESIS_HASHES is also unhealthy: unrecognised is not a pass.
         try {
           const response = await (overrides.rpcFetch ?? fetch)(config.rpc.url, {
             method: "POST",
@@ -1051,14 +1031,14 @@ export function createApplication(
             body: JSON.stringify({
               jsonrpc: "2.0",
               id: 1,
-              method: "eth_chainId",
+              method: "getGenesisHash",
               params: [],
             }),
           });
           if (!response.ok) throw Error("rpc probe failed");
           const payload = (await response.json()) as { result?: string };
-          if (Number.parseInt(payload.result ?? "", 16) !== config.rpc.chainId)
-            throw Error("rpc chain mismatch");
+          if (payload.result !== CLUSTER_GENESIS_HASHES[config.rpc.cluster])
+            throw Error("rpc cluster mismatch");
           rpcHealthy = true;
         } catch {
           rpcHealthy = false;
@@ -1097,7 +1077,6 @@ export function createApplication(
       venues?.store.close();
       lazyKernel?.close();
       lazyKernel = undefined;
-      noxaStore?.close();
       sessions?.close();
       runs.close();
       state = "stopped";
@@ -1124,7 +1103,6 @@ export function createApplication(
             provider: provider.id,
           },
           rpc: rpcStatus,
-          noxa: config.rpc ? rpcStatus : { status: "unconfigured" },
           simulation: config.rpc ? rpcStatus : { status: "unconfigured" },
           market: config.rpc
             ? { status: "available" }

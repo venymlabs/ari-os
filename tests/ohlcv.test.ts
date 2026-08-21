@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   aggregateCandles,
   marketAnalytics,
+  rational,
   type MarketTrade,
 } from "../src/market/ohlcv.js";
 
@@ -17,8 +18,25 @@ const trade = (
   price: { numerator: price[0], denominator: price[1] },
   baseAmount: base,
   quoteAmount: quote,
-  blockNumber: 1n,
-  logIndex: 0,
+  slot: 1n,
+  sequence: 0,
+});
+
+describe("exact rational prices", () => {
+  // Carried over from the retired Uniswap V3 pricing suite: the decimal
+  // adjustment it asserted was EVM-specific, but the fraction underneath it —
+  // always reduced, never float, denominator always positive — is what makes
+  // candle aggregation order-independent and still has to hold.
+  it("reduces to lowest terms and refuses a non-positive denominator", () => {
+    expect(rational(2n, 4n)).toEqual({ numerator: 1n, denominator: 2n });
+    expect(rational(10n ** 12n, 10n ** 18n)).toEqual({
+      numerator: 1n,
+      denominator: 1_000_000n,
+    });
+    expect(rational(-6n, 4n)).toEqual({ numerator: -3n, denominator: 2n });
+    expect(() => rational(1n, 0n)).toThrow(/denominator/i);
+    expect(() => rational(1n, -1n)).toThrow(/denominator/i);
+  });
 });
 
 describe("OHLCV aggregation", () => {
@@ -57,7 +75,7 @@ describe("OHLCV aggregation", () => {
     ]);
   });
 
-  it("deduplicates reorg IDs and rejects invalid inputs", () => {
+  it("deduplicates repeated trade IDs and rejects invalid inputs", () => {
     const t = trade("same", 60, [1n, 1n], 2n, 2n);
     expect(aggregateCandles([t, t], 60)[0]?.trades).toBe(1);
     expect(() =>
