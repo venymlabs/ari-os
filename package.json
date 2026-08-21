@@ -9,7 +9,8 @@
   "bin": {
     "raos": "dist/bin/robinhood-agent-os.js",
     "raos-telegram": "dist/bin/telegram.js",
-    "raos-signer": "dist/bin/signer.js"
+    "raos-signer": "dist/bin/signer.js",
+    "raos-mcp": "dist/bin/mcp.js"
   },
   "files": [
     "dist",
@@ -68,10 +69,14 @@
   },
   "peerDependencies": {
     "@drift-labs/sdk": "^2.156.0",
+    "@modelcontextprotocol/sdk": "^1.12.0",
     "@meteora-ag/dlmm": "^1.9.0"
   },
   "peerDependenciesMeta": {
     "@drift-labs/sdk": {
+      "optional": true
+    },
+    "@modelcontextprotocol/sdk": {
       "optional": true
     },
     "@meteora-ag/dlmm": {

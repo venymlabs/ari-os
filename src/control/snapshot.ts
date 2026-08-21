@@ -15,14 +15,19 @@
  *   · inflight           — kernel trades still in `reserved` / `sent`
  *   · wallet / spot      — `SolanaReader.getTokenHoldings`, when custody is
  *                          mounted (the default daemon mounts none)
+ *   · strategies         — `StrategyStore`, when a venue composition mounted a
+ *                          runner. Absent without custody, and reported absent
+ *                          rather than shown as an empty list.
+ *   · signals            — the PumpPortal trade tape + rug-heat engine, on the
+ *                          same condition. `connected` is the live socket
+ *                          state, so a silent feed reads as disconnected rather
+ *                          than as a market with no trades in it.
  *
  * Explicitly unavailable, because no source exists in this repo yet:
  *   · approvals          — the kernel has NO pending-approval queue.
  *                          `TradeGatewayImpl` takes `confirmedByUser` per call
  *                          and the composition leaves it unwired, so there is
  *                          nothing to queue and nothing to decide.
- *   · strategies         — the runners are unported Aetheria packages.
- *   · signals            — the PumpPortal tape is an unported Aetheria package.
  *   · perp / DLMM legs   — `PerpsVenue.getPositions` exists but needs the
  *                          optional Drift SDK peer and live RPC; no lister is
  *                          mounted for the console.
@@ -43,6 +48,9 @@ import {
   WSOL_MINT,
 } from "../kernel/money.js";
 import { TOKEN_2022_PROGRAM_ID } from "../chains/solana/spl.js";
+import type { SignalsFeed } from "../data/index.js";
+import type { StrategyStore } from "../strategy/index.js";
+import { strategyView } from "../strategy/index.js";
 import type { PolicyController } from "./policy.js";
 import type {
   ActivityEntry,
@@ -53,6 +61,10 @@ import type {
   DashboardSnapshot,
   Holding,
   InflightTrade,
+  SignalsView,
+  StrategyView,
+  TapeRow,
+  TokenSignalView,
   TradeStateView,
 } from "./view.js";
 
@@ -81,8 +93,19 @@ export interface ControlRuntime {
   kernel(): KernelStore | undefined;
   /** Read-side chain view, when custody mounts one. */
   balances?: SolanaReader | undefined;
+  /** Autonomous strategies, when a runner is mounted. */
+  strategies?: StrategyStore | undefined;
+  /** The trade tape + rug-heat engine, when a feed is mounted. */
+  signals?: SignalsFeed | undefined;
   now?: () => number;
 }
+
+/** How far back the console's signals panel looks. Matches the engine default. */
+export const SIGNALS_WINDOW_MS = 300_000;
+/** Most recent prints shown on the tape. */
+const TAPE_ROWS = 60;
+/** Mints ranked into the token table. */
+const SIGNAL_TOKENS = 24;
 
 const KNOWN: Record<string, { symbol: string; decimals: number }> = {
   [WSOL_MINT]: { symbol: "SOL", decimals: SOL_DECIMALS },
@@ -257,14 +280,103 @@ async function readHoldings(
   return rows;
 }
 
+/** Strategies from the mounted store, newest-first. Empty when none is mounted. */
+function readStrategies(runtime: ControlRuntime): readonly StrategyView[] {
+  const store = runtime.strategies;
+  if (!store) return [];
+  try {
+    return store.all().map(strategyView);
+  } catch {
+    // A strategy DB that cannot be read must not take the whole console down;
+    // `SnapshotSources.strategies` already tells the operator it is mounted.
+    return [];
+  }
+}
+
+/**
+ * The signals panel, read off the live trade tape.
+ *
+ * Empty and disconnected when no feed is mounted — the honest rendering of "no
+ * source", which `SnapshotSources.signals` names explicitly so a quiet panel is
+ * never mistaken for a quiet market.
+ */
+function readSignals(runtime: ControlRuntime): SignalsView {
+  const feed = runtime.signals;
+  if (!feed) {
+    return {
+      windowMs: 0,
+      feedLabel: "UNAVAILABLE",
+      connected: false,
+      tape: [],
+      tokens: [],
+    };
+  }
+  const engine = feed.engine;
+  const watching = new Set(feed.watching());
+  const mints = feed.tape.mints();
+
+  const tokens: TokenSignalView[] = mints
+    .map((mint): TokenSignalView => {
+      const s = feed.tape.signals(mint, SIGNALS_WINDOW_MS);
+      const symbol = `${mint.slice(0, 4)}…${mint.slice(-4)}`;
+      return {
+        mint,
+        symbol,
+        // The feed carries no token metadata, so there is no name to report and
+        // none is invented.
+        name: "",
+        trades: s.trades,
+        buys: s.buys,
+        sells: s.sells,
+        netSolFlow: s.netSolFlow,
+        volumeSol: s.volumeSol,
+        uniqueBuyers: s.uniqueBuyers,
+        uniqueSellers: s.uniqueSellers,
+        buyPressurePct: s.buyPressurePct,
+        volumeWeightedBuyPressurePct: s.volumeWeightedBuyPressurePct,
+        largestTradeSol: s.largestTradeSol,
+        priceChangePct: s.priceChangePct ?? null,
+        rugHeat: engine.rugHeatScore(mint, SIGNALS_WINDOW_MS),
+        watched: watching.has(mint),
+      };
+    })
+    .filter((t) => t.trades > 0)
+    .sort((a, b) => b.volumeSol - a.volumeSol)
+    .slice(0, SIGNAL_TOKENS);
+
+  const tape: TapeRow[] = mints
+    .flatMap((mint) =>
+      feed.tape.trades(mint).map((t, i) => ({
+        id: `${mint}:${t.ts}:${i}`,
+        ts: t.ts,
+        mint,
+        symbol: `${mint.slice(0, 4)}…${mint.slice(-4)}`,
+        isBuy: t.isBuy,
+        solAmount: t.solAmount,
+        trader: t.trader,
+        priceSol: t.priceSol ?? null,
+      })),
+    )
+    .sort((a, b) => b.ts - a.ts)
+    .slice(0, TAPE_ROWS);
+
+  return {
+    windowMs: SIGNALS_WINDOW_MS,
+    feedLabel: "PUMPPORTAL",
+    connected: feed.connected,
+    tape,
+    tokens,
+  };
+}
+
 export function snapshotSources(runtime: ControlRuntime): SnapshotSources {
   return {
     kernel: !!runtime.kernel(),
     wallet: !!runtime.balances && !!runtime.walletAddress,
     valuation: false,
     approvals: false,
-    strategies: false,
-    signals: false,
+    strategies: !!runtime.strategies,
+    signals: !!runtime.signals,
     perps: false,
     dlmm: false,
     chainHeight: false,
@@ -358,13 +470,7 @@ export async function buildSnapshot(
     approvals: [],
     activity,
     inflight,
-    strategies: [],
-    signals: {
-      windowMs: 0,
-      feedLabel: "UNAVAILABLE",
-      connected: false,
-      tape: [],
-      tokens: [],
-    },
+    strategies: readStrategies(runtime),
+    signals: readSignals(runtime),
   };
 }

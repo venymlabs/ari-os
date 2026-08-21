@@ -50,6 +50,8 @@ import { buildSnapshot, snapshotSources } from "./snapshot.js";
 import type { ControlRuntime } from "./snapshot.js";
 import { LOGIN_CSS, LOGIN_HTML, LOGIN_JS } from "./login.js";
 import { STRATEGY_STATUSES } from "./view.js";
+import type { StrategyStatus } from "./view.js";
+import { strategyView } from "../strategy/index.js";
 
 export { ControlAuth, SESSION_COOKIE } from "./auth.js";
 export type { ControlAuthOptions } from "./auth.js";
@@ -461,12 +463,28 @@ export function registerControlPlane(
           "VALIDATION_ERROR",
           `status must be one of ${STRATEGY_STATUSES.join(", ")}`,
         );
-      return fail(
-        reply,
-        503,
-        "STRATEGIES_UNAVAILABLE",
-        "no strategy runner is mounted in this build; the runners are unported Aetheria packages (see docs/plans/2026-08-21-solana-unification.md, step 4)",
-      );
+      const store = runtime.strategies;
+      // A runner is only mounted when custody is: with no wallet there is no
+      // gateway for a strategy to execute through, so there is nothing to
+      // pause. 503 says "not in this deployment", not "your request was wrong".
+      if (!store)
+        return fail(
+          reply,
+          503,
+          "STRATEGIES_UNAVAILABLE",
+          "no strategy runner is mounted in this process: strategies are composed alongside custody, and this daemon was started without a wallet",
+        );
+      // Unknown id is a 404, never a silent success — an operator pressing
+      // "pause" has to be able to tell a no-op from a stale row.
+      if (!store.setStatus(req.params.id, status as StrategyStatus))
+        return fail(reply, 404, "NOT_FOUND", `no strategy ${req.params.id}`);
+      const row = store.get(req.params.id);
+      return reply.send({
+        ok: true,
+        id: req.params.id,
+        status,
+        ...(row ? { strategy: strategyView(row) } : {}),
+      });
     },
   );
 

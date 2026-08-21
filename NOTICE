@@ -64,6 +64,42 @@ Files derived from Aetheria
   src/chains/solana/local-wallet.ts from packages/wallet/src/local-wallet.ts
   src/chains/solana/rpc.ts          from packages/integrations/src/rpc.ts
 
+  src/data/index.ts                 from packages/data/src/index.ts
+  src/data/pumpportal.ts            from packages/data/src/pumpportal.ts
+  src/data/signals-engine.ts        from packages/data/src/signals-engine.ts
+  src/data/tape.ts                  from packages/data/src/tape.ts
+  src/data/feed.ts                  NEW in ARI OS — see below
+
+  src/mcp/index.ts                  from packages/mcp/src/index.ts
+  src/mcp/sdk.ts                    from packages/mcp/src/server.ts (its SDK
+                                         imports, inverted into a lazy loader)
+  src/mcp/server.ts                 from packages/mcp/src/server.ts
+  src/mcp/stdio.ts                  from packages/mcp/src/stdio.ts
+  src/bin/mcp.ts                    from packages/mcp/src/bin/aetheria-mcp.ts
+
+  src/strategy/index.ts             from packages/strategy/src/index.ts
+  src/strategy/runner.ts            from packages/strategy/src/runner.ts
+  src/strategy/store.ts             from packages/strategy/src/store.ts
+  src/strategy/executor.ts          NEW in ARI OS — see below
+  src/strategy/view.ts              NEW in ARI OS — see below
+
+  Two Aetheria packages were assessed and deliberately NOT ported:
+
+  `packages/memory/` — `src/cognition/memory/` already implements a strictly
+  stronger durable memory store (revision-checked batches, secret scanning,
+  byte budgets, per-session snapshots) on `node:sqlite`. Porting Aetheria's
+  simpler per-user turn/fact table would have added a second, weaker memory
+  system rather than a capability.
+
+  `packages/channel-telegram/` — `src/telegram/runner.ts` is ARI OS's own
+  chain-agnostic long-poll runner over `src/gateway/channels/`. Adopting the
+  grammY bot would have added a production dependency and a second Telegram
+  implementation to reach the same API.
+
+  `packages/mcp/src/json-schema.ts` was likewise not ported: it is a
+  hand-rolled zod→JSON-Schema shim, and ARI OS already depends on
+  `zod-to-json-schema`, whose output `ToolRegistry.schemas()` emits.
+
   src/chains/solana/spl.ts is NOT derived from Aetheria and is not covered by
   Apache-2.0. It is a clean-room MIT file written for ARI OS to replace the
   `@solana/spl-token` dependency: three public on-chain program addresses and
@@ -104,8 +140,20 @@ Tests derived from Aetheria
   tests/pools-rebalance-decide.test.ts
                                     from packages/pools/src/rebalance/decide.test.ts
   tests/pools-tools.test.ts         from packages/pools/src/tools/tools.test.ts
+  tests/data-tape.test.ts           from packages/data/src/tape.test.ts (the
+                                         PumpPortal cases are new)
+  tests/strategy-runner.test.ts     from packages/strategy/src/runner.test.ts
+                                         (the TradeGateway chokepoint cases are
+                                         new)
+  tests/mcp-server.test.ts          NEW in ARI OS — Aetheria's mcp package had
+                                         no tests; these run with the optional
+                                         SDK absent
   tests/kernel-perp-settle.test.ts  NEW in ARI OS — covers the venue-position
                                          settle branch
+  tests/data-signals-mount.test.ts  NEW in ARI OS and MIT — proves the
+                                         `RugHeatSource` port is satisfied and
+                                         that mounting an engine is not a
+                                         relaxation
 
 Modifications made (Apache-2.0 §4(b))
 ─────────────────────────────────────
@@ -153,8 +201,59 @@ Modifications made (Apache-2.0 §4(b))
     optional interface properties widened to `?: T | undefined` where ARI OS's
     `exactOptionalPropertyTypes` requires it; three latent unused-binding lint
     errors fixed.
-  * `@drift-labs/sdk` and `@meteora-ag/dlmm` are declared as OPTIONAL peer
-    dependencies rather than dependencies, so they stay out of the lockfile and
-    out of `npm audit --omit=dev`; the lazy loaders' error text names the npm
-    install command.
+  * `@drift-labs/sdk`, `@meteora-ag/dlmm` and `@modelcontextprotocol/sdk` are
+    declared as OPTIONAL peer dependencies rather than dependencies, so they
+    stay out of the lockfile and out of `npm audit --omit=dev`; the lazy
+    loaders' error text names the npm install command.
+  * `src/data/pumpportal.ts` — the `ws` package is replaced by Node's built-in
+    global `WebSocket` (WHATWG, stable in Node 22), so the keyless PumpPortal
+    feed adds no production dependency. That API has no `terminate()` or
+    `removeAllListeners()`, so a monotonic socket generation makes a superseded
+    socket's late frames inert instead; the reconnect and watchdog timers are
+    `unref`'d so a market feed never holds the process open; and a frame whose
+    size does not parse as a finite non-negative number is dropped rather than
+    admitted as `NaN`.
+  * `src/data/signals-engine.ts` — the `RugHeat` interface is imported from
+    `src/pools/signals.ts` (where ARI OS extracted it) rather than redeclared,
+    and the class states `implements RugHeatSource`, so satisfying the port the
+    pools guards read is checked by the compiler. Scoring is unchanged.
+  * `src/data/feed.ts` — NEW. Aetheria wired tape + watcher + engine inside its
+    engine package, which ARI OS does not have. `SignalsFeed` is that wiring
+    with a lifecycle the composition root owns: the engine exists from
+    construction (so `guardRugHeat` always has a source) while `start()` — the
+    network side effect — belongs to `Application.start()`. Auto-following new
+    launches is bounded, and explicitly watched mints are pinned against
+    eviction.
+  * `src/strategy/store.ts` — `node:sqlite`'s `DatabaseSync` instead of
+    better-sqlite3; `.changes` is read through `Number()` because `node:sqlite`
+    returns it as a bigint; `setStatus` returns whether a row was hit so the
+    console can answer 404; an unparseable `params` blob degrades to `{}`
+    rather than throwing inside the tick loop; `all()` was added for the
+    console, which shows every strategy rather than one user's.
+  * `src/strategy/runner.ts` — Aetheria's `SwapRequest` came from its `shared`
+    runtime contract, which ARI OS deliberately did not carry over, so the
+    request shape is declared locally as `StrategySwap`; the tick timer is
+    `unref`'d. The planning logic, the error breaker and the reschedule
+    arithmetic are unchanged.
+  * `src/strategy/executor.ts` — NEW, and the reason the port is honest.
+    Aetheria's runner called an engine-level `swap()` that owned quoting and
+    execution. ARI OS has no such engine, so `gatewayExecutor` quotes through
+    `JupiterClient`, assembles a plain `TradeIntent` and hands it to
+    `TradeGateway.execute()` — the same chokepoint every tool uses. It holds no
+    keypair, no broadcaster and no RPC write. `confirmedByUser` is never set:
+    an unattended schedule cannot assert that a human confirmed a trade, so an
+    unpinned mint is refused by `MINT_NOT_PINNED` rather than waved through.
+  * `src/strategy/view.ts` — NEW. Aetheria surfaced strategies as Telegram
+    text; ARI OS has a console, so this projects a row onto its `StrategyView`,
+    following `src/control/snapshot.ts`'s rule of never inventing a number (no
+    trigger without a real price reading, no budget meter without a budget).
+  * `src/mcp/server.ts` — the tool set is ARI OS's `ToolRegistry` rather than
+    Aetheria's `AnyTool[]`, so the handler delegates to `registry.invoke()`
+    (which already owns validation, capability checks, timeouts and the audit
+    event) instead of re-validating and calling `tool.execute()` itself. The
+    granted capability set comes from the composition root and cannot be
+    widened by a request; a tool outside it is not listed at all.
+  * `src/bin/mcp.ts` — Aetheria's bin threw on every `tools/call` because it
+    had no way to build a tool context. ARI OS composes the same `Application`
+    the daemon does, mounts no custody, and grants read-only capabilities.
   * Source formatting normalised to ARI OS's Prettier configuration.

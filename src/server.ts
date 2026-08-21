@@ -296,6 +296,11 @@ export async function createStandaloneServer(
       policy: application.control.policy,
       kernel: () => application.control.kernel(),
       balances: application.control.balances,
+      // Both are undefined without custody, and the console reports that as an
+      // absent source rather than as an empty list of strategies and a silent
+      // market. See `snapshotSources`.
+      strategies: application.control.strategies,
+      signals: application.control.signals,
     },
     auth: {
       bearerToken: config.auth.bearerToken,

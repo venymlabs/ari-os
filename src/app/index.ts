@@ -78,6 +78,13 @@ import {
   RpcChainReader,
 } from "../pools/index.js";
 import { DRIFT_SETTLEMENT_MINT } from "../perps/drift/convert.js";
+import { SignalsFeed } from "../data/index.js";
+import {
+  gatewayExecutor,
+  StrategyRunner,
+  StrategyStore,
+  strategyMint,
+} from "../strategy/index.js";
 
 /**
  * The numeric slot {@link ProductionRiskEvaluator} reserves for chain identity.
@@ -168,6 +175,15 @@ export interface ControlSurface {
   /** Chain reads for the wallet panel; absent when custody is unmounted. */
   balances?: SolanaReader;
   kernel(): KernelStore | undefined;
+  /**
+   * Autonomous strategies, when a venue composition mounted them. Absent in the
+   * default daemon (no custody ⇒ no runner ⇒ nothing to schedule), and the
+   * console reports that rather than rendering an empty list as "none running".
+   */
+  strategies?: StrategyStore;
+  strategyRunner?: StrategyRunner;
+  /** The trade tape + rug-heat engine, when mounted. */
+  signals?: SignalsFeed;
 }
 
 export interface Application {
@@ -785,6 +801,16 @@ interface VenueComposition {
   store: KernelStore;
   /** The read side of the cluster, for the operator console's wallet panel. */
   reader: SolanaReader;
+  /**
+   * The PumpPortal trade tape and the rug-heat engine read off it. Mounted
+   * unconditionally so `guardRugHeat` always has a source; started by
+   * {@link Application.start} because opening a socket is a lifecycle event,
+   * not a constructor side effect.
+   */
+  signals: SignalsFeed;
+  /** Autonomous strategies. Every trade they propose goes through `gateway`. */
+  strategies: StrategyStore;
+  strategyRunner: StrategyRunner;
 }
 
 /**
@@ -880,6 +906,33 @@ function createVenueComposition(
     // SETTLE_UNVERIFIABLE — a perp fill cannot be read off a token balance.
     ...(positions ? { positions } : {}),
   });
+  // The trade tape and its rug-heat engine. Constructed here and mounted on the
+  // pools tools BEFORE anything can trade, because `guardRugHeat` refuses on a
+  // missing reading — an unmounted engine means no curve buys at all. Mounting
+  // it is not a relaxation: over an empty tape it still scores 60/100 ("no
+  // trades in window"), which is at the default rejection threshold. Only
+  // observed trades can produce a passing reading.
+  const signals = new SignalsFeed();
+  // Autonomous strategies. `gatewayExecutor` is the ONLY executor mounted, and
+  // its only route to value movement is `gateway.execute` — the same chokepoint
+  // the tools use, with the same guards, caps, journal and kill switch.
+  const strategies = new StrategyStore(
+    join(config.dataDir, "strategies.sqlite"),
+  );
+  const strategyRunner = new StrategyRunner(
+    strategies,
+    gatewayExecutor({
+      gateway,
+      jupiter,
+      solana,
+      ownerWallet: wallet.pubkey,
+      // The only deterministic pin this process owns. A strategy on a mint the
+      // operator has not pinned produces an `untrusted` intent, which the
+      // kernel refuses with MINT_NOT_PINNED — the runner never asserts consent
+      // on the operator's behalf.
+      pinnedMints: () => policyController.get().mintAllowlist,
+    }),
+  );
   const toolContext: ToolContext = {
     ownerWallet: wallet.pubkey,
     rpcUrl: config.rpc.url,
@@ -896,6 +949,9 @@ function createVenueComposition(
   return {
     store: kernelStore,
     reader: solana,
+    signals,
+    strategies,
+    strategyRunner,
     mounts: {
       // `confirmedByUser` is deliberately unwired: this process has no
       // per-invocation human-confirmation channel, and the default of `false`
@@ -910,8 +966,12 @@ function createVenueComposition(
         }),
         curve: new PumpFunClient(chain),
         chain,
-        // No signals engine is wired, so `guardRugHeat` refuses on a missing
-        // reading: that means no curve buys, not unchecked ones.
+        // The rug-heat source `guardRugHeat` reads. See the comment where the
+        // feed is constructed: mounted always, informed only while it runs.
+        signals: signals.engine,
+        // Warm the tape for a mint on the read path, so the NEXT attempt has a
+        // measurement instead of the illiquidity default.
+        watch: (mint: string) => signals.watch(mint),
       },
     },
   };
@@ -970,6 +1030,13 @@ export function createApplication(
     policy: policyController,
     walletAddress: overrides.wallet?.pubkey ?? null,
     ...(venues ? { balances: venues.reader } : {}),
+    ...(venues
+      ? {
+          strategies: venues.strategies,
+          strategyRunner: venues.strategyRunner,
+          signals: venues.signals,
+        }
+      : {}),
     kernel() {
       if (venues) return venues.store;
       if (state === "stopped") return undefined;
@@ -1061,6 +1128,20 @@ export function createApplication(
         } catch {
           tradingHealthy = false;
         }
+      if (venues) {
+        // Opening the keyless PumpPortal socket is a network side effect, so it
+        // belongs to `start()` rather than to composition. Once it is running,
+        // `guardRugHeat` has observed trades to read instead of the
+        // no-trades-in-window default that refuses every curve buy.
+        venues.signals.start();
+        // Follow the mints the persisted strategies already name, so a restart
+        // does not lose the tape that made their next trade decidable.
+        for (const row of venues.strategies.all()) {
+          const mint = strategyMint(row);
+          if (mint) venues.signals.watch(mint);
+        }
+        venues.strategyRunner.start();
+      }
       state = "ready";
     },
     ready() {
@@ -1074,6 +1155,9 @@ export function createApplication(
       if (state === "stopped") return;
       if (reconciliationTimer) clearInterval(reconciliationTimer);
       tc?.close();
+      venues?.strategyRunner.stop();
+      venues?.strategies.close();
+      venues?.signals.stop();
       venues?.store.close();
       lazyKernel?.close();
       lazyKernel = undefined;

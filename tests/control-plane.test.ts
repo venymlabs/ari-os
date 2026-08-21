@@ -13,6 +13,8 @@ import {
   registerControlPlane,
 } from "../src/control/index.js";
 import type { ControlRuntime } from "../src/control/index.js";
+import { StrategyStore } from "../src/strategy/index.js";
+import { SignalsFeed } from "../src/data/index.js";
 import { loadConfig } from "../src/config/index.js";
 import { createStandaloneServer } from "../src/server.js";
 import { removeDir } from "./helpers.js";
@@ -64,6 +66,9 @@ function mount(
     token?: string | undefined;
     webRoot?: string;
     canArm?: boolean;
+    /** Mount a real strategy store, as a composition with custody would. */
+    strategies?: StrategyStore;
+    signals?: SignalsFeed;
   } = {},
 ): { app: FastifyInstance; store: KernelStore; policy: PolicyController } {
   const store = new KernelStore(":memory:");
@@ -79,6 +84,8 @@ function mount(
     walletAddress: null,
     policy,
     kernel: () => store,
+    ...(options.strategies ? { strategies: options.strategies } : {}),
+    ...(options.signals ? { signals: options.signals } : {}),
   };
   const app = Fastify({ logger: false });
   servers.push(app);
@@ -461,6 +468,79 @@ describe("control plane — the six routes", () => {
     expect(strategy.json()).toMatchObject({
       error: { code: "STRATEGIES_UNAVAILABLE" },
     });
+  });
+
+  it("backs the strategies route once a runner is mounted", async () => {
+    const strategies = new StrategyStore(":memory:");
+    const signals = new SignalsFeed({
+      // Constructed but never connected: nothing here touches a network.
+      watcher: {
+        createSocket: () =>
+          ({
+            readyState: 0,
+            send() {},
+            close() {},
+            addEventListener() {},
+          }) as never,
+      },
+    });
+    const row = strategies.create(
+      1,
+      "dca",
+      {
+        token: "BonkMint11111111111111111111111111111111111",
+        amountUiPerStep: 0.1,
+      },
+      Date.now(),
+    );
+    const { app } = mount({ strategies, signals });
+
+    // The panel now reports a measurement instead of an absence.
+    const sources = await app.inject({
+      url: "/api/sources",
+      headers: bearer(),
+    });
+    expect(sources.json()).toMatchObject({ strategies: true, signals: true });
+
+    const snap = (
+      await app.inject({ url: "/api/snapshot", headers: bearer() })
+    ).json();
+    expect(snap.strategies).toHaveLength(1);
+    expect(snap.strategies[0]).toMatchObject({ id: row.id, kind: "dca" });
+    // An unstarted feed is DISCONNECTED, not a quiet market.
+    expect(snap.signals).toMatchObject({
+      feedLabel: "PUMPPORTAL",
+      connected: false,
+    });
+
+    const paused = await app.inject({
+      method: "POST",
+      url: `/api/strategies/${row.id}/status`,
+      headers: { ...bearer(), ...json },
+      payload: { status: "paused" },
+    });
+    expect(paused.statusCode).toBe(200);
+    expect(paused.json()).toMatchObject({ ok: true, status: "paused" });
+    expect(strategies.get(row.id)?.status).toBe("paused");
+
+    // An unknown id is a 404 — an operator must be able to tell a no-op from a
+    // stale row.
+    const missing = await app.inject({
+      method: "POST",
+      url: "/api/strategies/no-such-id/status",
+      headers: { ...bearer(), ...json },
+      payload: { status: "paused" },
+    });
+    expect(missing.statusCode).toBe(404);
+
+    const bad = await app.inject({
+      method: "POST",
+      url: `/api/strategies/${row.id}/status`,
+      headers: { ...bearer(), ...json },
+      payload: { status: "definitely-not-a-status" },
+    });
+    expect(bad.statusCode).toBe(400);
+    strategies.close();
   });
 
   it("moves the real policy the money path reads, and cannot raise authority", async () => {
