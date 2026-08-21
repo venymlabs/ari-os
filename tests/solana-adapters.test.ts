@@ -55,6 +55,40 @@ function unsignedTransfer(payer: Keypair): string {
 const fakeConnection = (over: Partial<Connection>): Connection =>
   over as unknown as Connection;
 
+/** In-process signing is gated; tests opt in explicitly, as production must not. */
+const UNSAFE = { allowUnsafeInProcessSigning: true } as const;
+process.env.UNSAFE_ALLOW_INPROCESS_SIGNER = "true";
+
+describe("LocalWallet — the in-process signing gate", () => {
+  it("refuses to construct without the explicit code-level acknowledgement", () => {
+    const ks = Keystore.init(join(temp(), "keystore.json"), "passphrase-1234");
+    const generated = generateWallet();
+    storeWallet(ks, generated.secretKey);
+    expect(() =>
+      LocalWallet.fromKeystore(ks, {} as unknown as typeof UNSAFE),
+    ).toThrow(/opted into explicitly/);
+  });
+
+  it("refuses to construct when the environment has not opted in", () => {
+    const previous = process.env.UNSAFE_ALLOW_INPROCESS_SIGNER;
+    delete process.env.UNSAFE_ALLOW_INPROCESS_SIGNER;
+    try {
+      const ks = Keystore.init(
+        join(temp(), "keystore.json"),
+        "passphrase-1234",
+      );
+      const generated = generateWallet();
+      storeWallet(ks, generated.secretKey);
+      expect(() => LocalWallet.fromKeystore(ks, UNSAFE)).toThrow(
+        /UNSAFE_ALLOW_INPROCESS_SIGNER/,
+      );
+    } finally {
+      if (previous !== undefined)
+        process.env.UNSAFE_ALLOW_INPROCESS_SIGNER = previous;
+    }
+  });
+});
+
 describe("LocalWallet — keystore-backed WalletProvider", () => {
   it("signs a v0 transaction and returns the canonical wire + base58 signature", async () => {
     const ks = Keystore.init(join(temp(), "keystore.json"), "passphrase-1234");
@@ -62,7 +96,7 @@ describe("LocalWallet — keystore-backed WalletProvider", () => {
     const payer = Keypair.fromSecretKey(Uint8Array.from(generated.secretKey));
     storeWallet(ks, generated.secretKey);
 
-    const wallet = LocalWallet.fromKeystore(ks);
+    const wallet = LocalWallet.fromKeystore(ks, UNSAFE);
     expect(wallet.pubkey).toBe(generated.pubkey);
 
     const unsigned = unsignedTransfer(payer);
@@ -81,7 +115,7 @@ describe("LocalWallet — keystore-backed WalletProvider", () => {
     const ks = Keystore.init(join(temp(), "keystore.json"), "passphrase-1234");
     const generated = generateWallet();
     storeWallet(ks, generated.secretKey);
-    const wallet = LocalWallet.fromKeystore(ks);
+    const wallet = LocalWallet.fromKeystore(ks, UNSAFE);
     // storeWallet zeroes the source buffer it was handed a copy of.
     expect(JSON.stringify(wallet)).not.toContain("secretKey");
     expect(Object.keys(wallet)).toEqual(["pubkey"]);
