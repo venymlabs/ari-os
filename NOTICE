@@ -100,6 +100,35 @@ Files derived from Aetheria
   hand-rolled zod→JSON-Schema shim, and ARI OS already depends on
   `zod-to-json-schema`, whose output `ToolRegistry.schemas()` emits.
 
+  The local-LLM provider support — `LLM_PROVIDERS` and `LlmConfig` in
+  `src/config/index.ts`, the `extraBody` hook on `OpenAICompatibleTransport`,
+  and `createModelProvider` in `src/app/adapters.ts` — is NOT derived from
+  Aetheria and is not covered by Apache-2.0. Aetheria's equivalent
+  (`packages/gateway/src/gateway.ts`, `packages/shared/src/config.ts`) is a
+  base-URL string map plus a four-line `providerExtraBody` switch over its own
+  `LlmConfig`/`LlmGateway` contracts, none of which ARI OS carried over. What
+  was taken across is a fact about a third party's HTTP API —
+  `chat_template_kwargs.enable_thinking` on a llama.cpp-backed server — and the
+  idea of keying request-body extras off the provider name. The implementation
+  here is a validated provider table feeding ARI OS's own strict-zod
+  `AppConfig`, `ModelCandidate` and `ModelRouter`, and is MIT like the rest of
+  ARI OS. tests/llm-provider.test.ts is likewise new and MIT.
+
+  Aetheria's uncommitted agent-loop work (`packages/agent/src/loop.ts`) was
+  assessed and deliberately NOT ported. Its context compaction — keep the last
+  N tool exchanges, truncate each tool result to a character budget, leave a
+  breadcrumb — is a weaker form of what `src/cognition/context/index.ts`
+  already does: `compileContext` prunes whole tool exchanges so a tool result is
+  never orphaned from its call, protects head, tail and financial messages by
+  kind, redacts secrets before any summarizer sees them, and reports
+  diagnostics. Truncating a tool result mid-string is precisely what a financial
+  transcript must not do. Its per-turn token totals are already recoverable:
+  `AgentRuntime` emits usage on every `model.responded` event and
+  `DurableRunStore.emit` persists the whole event. The one part worth taking was
+  its tool-call id normalization for local servers that omit `id`, which landed
+  in `OpenAICompatibleTransport` — the layer that parses the wire format —
+  rather than in the loop.
+
   src/chains/solana/spl.ts is NOT derived from Aetheria and is not covered by
   Apache-2.0. It is a clean-room MIT file written for ARI OS to replace the
   `@solana/spl-token` dependency: three public on-chain program addresses and

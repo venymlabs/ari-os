@@ -12,7 +12,7 @@ import {
   type BuiltInDependencies,
   type VenueMounts,
 } from "../tools/index.js";
-import { RegistryDispatcher } from "./adapters.js";
+import { createModelProvider, RegistryDispatcher } from "./adapters.js";
 import {
   CLUSTER_GENESIS_HASHES,
   RpcSimulator,
@@ -983,6 +983,8 @@ export function createApplication(
     modelProvider?: ModelProvider;
     tools?: BuiltInDependencies;
     rpcFetch?: typeof fetch;
+    /** Transport for the configured LLM endpoint. Defaults to global fetch. */
+    llmFetch?: typeof fetch;
     /**
      * Custody for the venue-backed toolsets. Omitted (the default) the perps
      * and liquidity tools are not registered at all.
@@ -1064,12 +1066,24 @@ export function createApplication(
       : []),
     ...(venues ? [TRADING_CAPABILITIES.POSITION_WRITE] : []),
   ];
-  const provider = overrides.modelProvider ?? {
-    id: "unconfigured",
-    complete: async () => {
-      throw Error("Model provider is not configured");
-    },
-  };
+  // An explicit override wins (tests, the smoke check, an embedder supplying
+  // its own planner); otherwise the configured endpoint is built here, once
+  // the registry is complete so the candidate can declare the real tool set.
+  // With neither, the provider is a stub that throws — a process with no model
+  // still serves tools, health and the console, it just cannot plan.
+  const provider =
+    overrides.modelProvider ??
+    (config.llm
+      ? createModelProvider(config.llm, registry, {
+          capabilities,
+          ...(overrides.llmFetch ? { fetch: overrides.llmFetch } : {}),
+        })
+      : {
+          id: "unconfigured",
+          complete: async () => {
+            throw Error("Model provider is not configured");
+          },
+        });
   const runtime = new AgentRuntime({
     providers: [provider],
     tools: new RegistryDispatcher(registry, capabilities),
@@ -1183,7 +1197,10 @@ export function createApplication(
           sessions: { status: db ? "available" : "unhealthy" },
           runs: { status: db ? "available" : "unhealthy" },
           model: {
-            status: overrides.modelProvider ? "available" : "unconfigured",
+            status:
+              overrides.modelProvider || config.llm
+                ? "available"
+                : "unconfigured",
             provider: provider.id,
           },
           rpc: rpcStatus,

@@ -7,6 +7,7 @@ import { DatabaseSync } from "node:sqlite";
 import { loadConfig, type AppConfig } from "./config/index.js";
 import type { ModelProvider } from "./agent/runtime/index.js";
 import { createApplication } from "./app/index.js";
+import { llmProviderId } from "./app/adapters.js";
 import { SessionStore } from "./storage/session-store.js";
 import { TRADING_CAPABILITIES } from "./agent/types.js";
 import { registerTradingApi } from "./live-trading/api.js";
@@ -290,7 +291,12 @@ export async function createStandaloneServer(
       // HOST ONLY. RPC URLs routinely carry an API key in the path or query,
       // and this string is rendered in a browser.
       rpcLabel: config.rpc ? new URL(config.rpc.url).host : "unconfigured",
-      modelLabel: overrides.modelProvider?.id ?? "unconfigured",
+      // Provider and model id only. The endpoint URL is not shown: a hosted
+      // provider's base URL can carry a key in its path, exactly as an RPC
+      // URL can, and this string is rendered in a browser.
+      modelLabel:
+        overrides.modelProvider?.id ??
+        (config.llm ? llmProviderId(config.llm) : "unconfigured"),
       bootedAt: Date.now(),
       walletAddress: application.control.walletAddress,
       policy: application.control.policy,

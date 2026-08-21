@@ -178,6 +178,63 @@ export MAINNET_ACKNOWLEDGE_RISK=I_ACKNOWLEDGE_MAINNET_RISK
 
 This unlocks mainnet selection only. Funded execution additionally requires `EXECUTION_MODE=live`, `LIVE_TRADING_ENABLED=true`, `LIVE_TRADING_ACKNOWLEDGE_RISK=I_ACKNOWLEDGE_LIVE_TRADING_RISK`, trading limits/account, private approval and authorization key files, and the isolated signer. See [Production trading](docs/TRADING.md).
 
+## Configure the model
+
+Nothing plans until an OpenAI-compatible endpoint is configured. Naming any
+`LLM_*` variable declares the intent to run a planner, and from there the
+required values are required — a key with no model, or a base URL with no
+provider, is refused at boot rather than surfacing as a 404 on the first turn.
+
+```bash
+export LLM_PROVIDER=openai            # or openrouter, groq, together, xai, deepseek
+export LLM_MODEL=gpt-4.1-mini
+export LLM_API_KEY="sk-..."           # required for a hosted provider
+```
+
+### Point it at your own hardware
+
+A self-hosted server is a first-class provider, not a fallback. Run llama.cpp
+behind Lemonade, Ollama, or `llama-server` and the model reasoning over your
+positions never leaves your network:
+
+```bash
+export LLM_PROVIDER=lemonade          # or ollama, llama-cpp
+export LLM_BASE_URL="http://192.168.1.91:8000/api/v1"
+export LLM_MODEL=Qwen3-8B-GGUF
+export LLM_CONTEXT_WINDOW=8192
+export LLM_MAX_OUTPUT_TOKENS=1024
+# LLM_API_KEY is optional here, and usually absent.
+```
+
+A **local** provider may be reached over plain HTTP and may hold no API key at
+all — over your own LAN there is no credential in flight and no vendor to
+authenticate to. A **hosted** provider fails closed on both counts: it must
+present `LLM_API_KEY`, and its base URL must be HTTPS, because a bearer token
+must never cross a network in cleartext. The key is held in a `Secret`, so it
+cannot reach a log, a JSON body, or an inspector; `config:check`, `/v1/health`
+and the console report the provider and model, never the endpoint URL or key.
+
+`LLM_BASE_URL` is optional when the provider's default endpoint is right, and
+each provider carries its own request-body extras. `lemonade` sends
+`chat_template_kwargs.enable_thinking = false`, which suppresses a reasoning
+model's thinking trace — roughly a 4x output-token saving on tool-routing steps,
+and often the difference between fitting a small context window and overflowing
+it. Adding a provider means adding a row to `LLM_PROVIDERS` in
+`src/config/index.ts`; the transport never learns any provider's name, and these
+extras are merged *under* the canonical OpenAI fields, so no provider profile
+can redefine the model, the transcript, or the tool set.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `LLM_PROVIDER` | — | `openai`, `openrouter`, `groq`, `together`, `xai`, `deepseek`, `lemonade`, `ollama`, `llama-cpp` |
+| `LLM_MODEL` | — | Model id, as the endpoint names it |
+| `LLM_BASE_URL` | provider default | OpenAI-compatible base URL; no query string, fragment, or embedded credentials |
+| `LLM_API_KEY` | — | Required for a hosted provider, optional for a local one |
+| `LLM_CONTEXT_WINDOW` | `8192` | Window the router budgets against |
+| `LLM_MAX_OUTPUT_TOKENS` | `1024` | Ceiling per completion; must be below the window |
+| `LLM_INPUT_COST_PER_MILLION` | `0` | Cost the router orders candidates by |
+| `LLM_OUTPUT_COST_PER_MILLION` | `0` | As above, for output tokens |
+
 ## API surface
 
 The standalone server provides:
