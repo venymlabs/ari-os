@@ -35,7 +35,9 @@ For noninteractive import, create private input files without putting either sec
 ```bash
 install -m 0600 /dev/null "$DATA_DIR/password.in"
 install -m 0600 /dev/null "$DATA_DIR/key.in"
-# Populate password.in and the 0x-prefixed key.in using a trusted editor.
+# Populate password.in and key.in using a trusted editor. key.in holds the
+# Ed25519 secret key in either format real Solana tooling emits: the
+# solana-keygen JSON byte array, or the base58 secret key.
 npm run signer -- import --keystore "$DATA_DIR/wallet.json" \
   --password-fd 3 --key-fd 4 \
   3<"$DATA_DIR/password.in" 4<"$DATA_DIR/key.in"
@@ -45,13 +47,60 @@ npm run signer -- status --keystore "$DATA_DIR/wallet.json"
 
 Keep `password.in` only if a supervisor needs it to start the signer; otherwise remove it securely. Never put a private key, password, mnemonic, signer token, or authorization key in an argument, environment variable, `.env`, chat, ticket, or log.
 
-Confirm that the address printed by `status` is exactly `TRADING_ACCOUNT`. Fund it only with the intended trade assets and enough ETH for gas.
+Confirm that the address printed by `status` is exactly `TRADING_ACCOUNT`. It is the base58 Ed25519 public key of the signing wallet. Fund it only with the intended trade assets and enough SOL for fees and rent.
 
 ## 3. Review the two policies
 
 `policy.json` controls the trading orchestrator. Runtime equivalents are `TRADING_MAX_AMOUNT_IN`, `TRADING_ALLOWED_TOKENS`, `TRADING_MAX_SLIPPAGE_BPS`, and `TRADING_FINALITY_BLOCKS`. Amounts are base-unit decimal integers; token allowlists are comma-separated addresses. `TRADING_MAX_AMOUNT_IN` is enforced independently in each token's native units; raw units from different tokens or decimal scales are never summed. Aggregate exposure is disabled unless the adapter supplies a single quote denomination with explicit decimals and price/valuation evidence.
 
-`sign-policy.json` is independently enforced by the signer. It binds chain ID, account, destination router, value, gas/fee ceilings, and calldata selectors. Setup currently allows the verified Robinhood Chain SwapRouter02 at `0xcaf681a66d020601342297493863e78c959e5cb2` and only its deadline-less `exactInputSingle` (`0x04e45aaf`) and `exactInput` (`0xb858183f`) selectors. Verify those methods and all limits against the exact intended trading flow before funding. Do not broaden `dataPrefixes` to `0x` for unattended production.
+`sign-policy.json` is independently enforced by the signer. It binds the cluster, the allowed fee payers, the allowed program IDs, the allowed instruction discriminators within each program, per-asset spend caps, and the compute-unit/priority-fee ceilings.
+
+Every allowed instruction must be classified by `effect`: `spend` (with a rule stating where in the instruction data the input amount lives and which asset it moves), `fee` (ComputeBudget only), or `none` — an operator assertion that this instruction cannot move value. An instruction that is not classified is refused, so a value-moving instruction can never slip through uncapped. Caps are denominated in the **input leg**, the asset leaving the wallet, so no price oracle sits in the safety path and no oracle manipulation can widen a limit. Caps are summed per asset across the whole transaction, so several individually small legs cannot add up past the limit.
+
+A transaction carrying an address lookup table is refused unless that table is pinned in `addressLookupTables`, because the signer cannot resolve looked-up addresses without trusting an external RPC. Even when pinned, an instruction whose program ID or capped mint resolves through a lookup table is still refused. Verify every program ID, discriminator, and limit against the exact intended trading flow before funding, and never allow a program without pinning its discriminators.
+
+Until `npm run setup:trading` is ported to Solana it still emits the retired EVM policy shape; the signer refuses to start on it with `policy_format_invalid`. Write `sign-policy.json` by hand for now — a minimal, deliberately narrow example:
+
+```json
+{
+  "version": 1,
+  "cluster": "mainnet-beta",
+  "feePayers": ["YourDedicatedWalletPubkey"],
+  "programs": [
+    {
+      "programId": "ComputeBudget111111111111111111111111111111",
+      "discriminator": "02",
+      "effect": "fee"
+    },
+    {
+      "programId": "ComputeBudget111111111111111111111111111111",
+      "discriminator": "03",
+      "effect": "fee"
+    },
+    {
+      "programId": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+      "discriminator": "0c",
+      "effect": "spend",
+      "spend": {
+        "asset": "YourInputMint",
+        "amountOffset": 1,
+        "amountEncoding": "u64le",
+        "mintAccountIndex": 1
+      }
+    }
+  ],
+  "caps": { "YourInputMint": "1000000" },
+  "maxInstructions": 8,
+  "maxAccountKeys": 32,
+  "maxRequiredSignatures": 1,
+  "maxComputeUnitLimit": 400000,
+  "maxComputeUnitPriceMicroLamports": "50000",
+  "maxPriorityFeeLamports": "15000",
+  "addressLookupTables": []
+}
+```
+
+`discriminator` is the lowercase hex prefix of the instruction data (`0c` is SPL Token `TransferChecked`; `02`/`03` are ComputeBudget `SetComputeUnitLimit`/`SetComputeUnitPrice`). `mintAccountIndex` is the index within that instruction's own account list where the mint appears; the signer verifies it matches `asset` before applying the cap, and refuses if the mint is not verifiable. `caps` and `maxPriorityFeeLamports` are decimal strings of base units, `native` meaning lamports.
 
 Contract provenance and current addresses are in [PRODUCTION-CONTRACTS.md](PRODUCTION-CONTRACTS.md). Re-run its live read-only checks before deployment.
 
@@ -160,13 +209,14 @@ npm run cli -- trade submit --id <executionId>
 ```
 
 Without `--live` the revoke is a dry run. Two policy prerequisites for a
-live revoke: the signer policy's `dataPrefixes` must include the ERC-20
-approve selector `0x095ea7b3` (the default `setup` policy now includes
-it), and the token contract address must be listed in the signer
-policy's `to` allowlist — the signer refuses to call contracts that are
-not explicitly allowed. Verify the cleared allowance on-chain after
-finalization. If the control plane itself may be compromised, still
-prefer a separately trusted wallet.
+live revoke: the signer policy must allow the SPL Token program
+`TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA` with the `Revoke`
+discriminator `05` classified as `effect: "none"`, and the token account
+whose delegation is being cleared must be a static account key of the
+transaction — the signer refuses programs and instructions that are not
+explicitly allowed, and refuses accounts it cannot resolve. Verify the
+cleared delegation on-chain after finalization. If the control plane
+itself may be compromised, still prefer a separately trusted wallet.
 
 Never retry an uncertain order with a new idempotency key. Query its execution ID and reconcile it first. Local `trade reconcile` requires `--id`; automatic startup/interval recovery scans all pending durable executions.
 
@@ -201,7 +251,7 @@ npm run signer -- reconcile \
   --rpc "$RPC_URL" 3<"$DATA_DIR/password.in"
 ```
 
-Compare receipts, pending account nonce, balances, allowances, API execution records, and signer replay/broadcast records. Never resubmit when outcome is uncertain.
+Compare signature statuses, each record's last valid block height against the current block height, balances, delegations, API execution records, and signer replay/broadcast records. Never resubmit when the outcome is uncertain. Solana has no account nonce: the recent blockhash is the replay fence, and crossing its last valid block height is terminal. An expired transaction is never re-signed under a fresh blockhash — recovery requires a new authorization from the control plane, never a retry.
 
 ## 9. Backup and restore
 

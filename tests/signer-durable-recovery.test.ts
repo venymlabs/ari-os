@@ -2,12 +2,13 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
-import { keccak256, serializeTransaction } from "viem";
+import { keccak256 } from "viem";
 import {
+  decodeTransaction,
+  loadSignPolicy,
   SqliteReplayStore,
   SignerService,
-  type SignPolicy,
+  unlockKeystore,
 } from "../src/signer/index.js";
 import {
   buildSimulationRequest,
@@ -19,6 +20,13 @@ import {
   type TradingRpc,
 } from "../src/live-trading/index.js";
 import { removeDir } from "./helpers.js";
+import {
+  buildTransaction,
+  createTestWallet,
+  pubkey,
+  systemTransfer,
+  writePolicy,
+} from "./signer-fixtures.js";
 
 const dirs: string[] = [];
 const temp = () => {
@@ -33,40 +41,31 @@ const account = "0x0000000000000000000000000000000000000001" as const,
 
 describe("durable signer result recovery", () => {
   it("atomically releases signed bytes to exactly one concurrent result caller", async () => {
-    const key = generatePrivateKey(),
-      owner = privateKeyToAccount(key),
-      tx = {
-        chainId: 46630,
-        to: router,
-        data: "0x12345678" as const,
-        value: 0n,
-        gas: 100000n,
-        nonce: 7,
-        type: "eip1559" as const,
-        maxFeePerGas: 20n,
-        maxPriorityFeePerGas: 2n,
-        accessList: [],
-      },
-      requestHash = keccak256(serializeTransaction(tx)),
-      store = new SqliteReplayStore(join(temp(), "signer.sqlite")),
-      policy: SignPolicy = {
-        chainIds: [46630],
-        accounts: [owner.address],
-        to: [router],
-        maxValue: 1n,
-        maxGas: 100000n,
-        maxFeePerGas: 20n,
-        maxPriorityFeePerGas: 2n,
-        dataPrefixes: ["0x12345678"],
-      },
+    const dir = temp(),
+      wallet = await createTestWallet(dir),
+      owner = await unlockKeystore(wallet.keystore, wallet.password),
+      policy = await loadSignPolicy(await writePolicy(dir, wallet.publicKey)),
+      transaction = buildTransaction({
+        payer: wallet.publicKey,
+        instructions: [systemTransfer(wallet.publicKey, pubkey(9), 1n)],
+      }),
+      messageHash = decodeTransaction(transaction).messageHash,
+      store = new SqliteReplayStore(join(dir, "signer.sqlite")),
       service = new SignerService(owner, store, policy);
-    await service.sign("auth", tx, owner.address);
+    const signed = await service.sign("auth", transaction, wallet.publicKey);
     const [a, b] = await Promise.all([
-      Promise.resolve().then(() => service.result("auth", requestHash, true)),
-      Promise.resolve().then(() => service.result("auth", requestHash, true)),
+      Promise.resolve().then(() => service.result("auth", messageHash, true)),
+      Promise.resolve().then(() => service.result("auth", messageHash, true)),
     ]);
-    expect([a, b].filter((x) => "raw" in x)).toHaveLength(1);
-    expect(a.hash).toBe(b.hash);
+    // The signed bytes are released to exactly one caller; both learn the
+    // signature so neither is left guessing whether signing happened.
+    expect(
+      [a, b].filter((x) => "transaction" in x && x.transaction),
+    ).toHaveLength(1);
+    expect([a, b].map((x) => "signature" in x && x.signature)).toEqual([
+      signed.signature,
+      signed.signature,
+    ]);
     expect(a.state).toBe("signed");
     expect(b.state).toBe("signed");
     store.close();

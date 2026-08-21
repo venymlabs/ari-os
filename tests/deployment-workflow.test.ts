@@ -47,7 +47,10 @@ describe("clone-to-trade deployment", () => {
     expect(trading).toContain("--key-fd");
     expect(trading).not.toMatch(/--private-key|--password\s+\S+/);
     expect(trading).toContain("npm run cli -- trade revoke --token");
-    expect(trading).toContain("0x095ea7b3");
+    // The signer policy prerequisite for a live revoke. Was the ERC-20
+    // approve selector `0x095ea7b3`; on Solana the analogue is the SPL Token
+    // program plus the `Revoke` instruction discriminator.
+    expect(trading).toContain("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
     expect(readme).not.toContain("read-only and cannot move funds");
   });
   it("describes the production package honestly and ships every deployment asset", async () => {

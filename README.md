@@ -34,7 +34,7 @@ The result is an agent runtime that can stay online, recover after a crash, proc
 | Risk | Exposure, concentration, drawdown, slippage, liquidity, oracle and sequencer checks |
 | Controls | Deterministic policy kernel, durable reservations, exact-transaction approvals |
 | Simulation | Pinned-block JSON-RPC simulation with provenance and evidence hashing |
-| Authorization | One-time envelopes bound to transaction, nonce, policy, approval, and simulation |
+| Authorization | One-time envelopes bound to transaction, recent blockhash, policy, approval, and simulation |
 | Interfaces | Authenticated Fastify API, resumable SSE, local/remote CLI, Telegram long polling |
 | Extensibility | Signed plugin manifests, capability mediation, isolated plugin workers |
 | Operations | Health, metrics, audit roots, Docker, Compose, systemd units, migration tools |
@@ -63,7 +63,7 @@ flowchart LR
     style X stroke-dasharray: 5 5
 ```
 
-The dashed edge matters. The shipped `raos-signer` process owns the encrypted keystore outside the API/model process. It independently decodes the serialized transaction, verifies policy and authorization claims, rechecks the nonce, and atomically consumes the one-time envelope before signing and broadcasting.
+The dashed edge matters. The shipped `raos-signer` process owns the encrypted keystore outside the API/model process. It independently decodes the transaction, verifies policy and authorization claims, rechecks that the recent blockhash has not expired, and atomically consumes the one-time envelope before signing and broadcasting. Blockhash expiry is terminal: an expired request fails closed and needs a fresh authorization, never a silent re-sign.
 
 ## Quickstart
 
@@ -229,7 +229,7 @@ Controls are independent by design:
 - Reservations count pending exposure before another trade can pass policy.
 - Approvals bind authenticated operators to an exact transaction and simulation.
 - Authorization envelopes are short-lived, one-time, and replay protected.
-- The isolated signer rechecks transaction fields, policy, authorization, replay state, and account nonce.
+- The isolated signer rechecks transaction fields, policy, authorization, replay state, and recent-blockhash expiry.
 - Audit events are append-only and can be anchored with Merkle roots.
 - Missing or unhealthy dependencies fail closed.
 
