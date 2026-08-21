@@ -19,6 +19,8 @@
     "deploy",
     "templates",
     "LICENSE",
+    "NOTICE",
+    "licenses",
     "THIRD_PARTY_NOTICES.md"
   ],
   "scripts": {
