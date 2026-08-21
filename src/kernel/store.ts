@@ -342,6 +342,27 @@ export class KernelStore {
       .run(event.tradeId, event.type, JSON.stringify(event), event.at);
   }
 
+  /**
+   * The newest journal rows across every trade, newest-first.
+   *
+   * {@link readJournal} answers "what happened to THIS trade"; the operator
+   * console needs "what has the kernel been doing", which is the same table
+   * read the other way round. `seq` comes back with the event because it is the
+   * only stable, total ordering the journal has — `at` can collide.
+   */
+  recentJournal(limit = 200): { seq: number; event: JournalEvent }[] {
+    const rows = this.#db
+      .prepare("SELECT seq, payload FROM journal ORDER BY seq DESC LIMIT ?")
+      .all(Math.max(1, Math.min(1000, Math.floor(limit)))) as {
+      seq: number;
+      payload: string;
+    }[];
+    return rows.map((r) => ({
+      seq: Number(r.seq),
+      event: JSON.parse(r.payload) as JournalEvent,
+    }));
+  }
+
   readJournal(tradeId: string): JournalEvent[] {
     const rows = this.#db
       .prepare(

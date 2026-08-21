@@ -10,6 +10,7 @@ import { createApplication } from "./app/index.js";
 import { SessionStore } from "./storage/session-store.js";
 import { TRADING_CAPABILITIES } from "./agent/types.js";
 import { registerTradingApi } from "./live-trading/api.js";
+import { registerControlPlane } from "./control/index.js";
 export interface ServerOptions {
   ready: () => boolean | Promise<boolean>;
   health: () => unknown | Promise<unknown>;
@@ -280,6 +281,28 @@ export async function createStandaloneServer(
       ? r.code(503).send({ error: { code: "MODEL_UNAVAILABLE" } })
       : undefined,
   );
+  // The operator console, served by this daemon on this origin. It is mounted
+  // unconditionally and fails closed: with no API credential configured every
+  // /api route — the approvals decision above all — answers 401.
+  registerControlPlane(app, {
+    runtime: {
+      network: config.network,
+      // HOST ONLY. RPC URLs routinely carry an API key in the path or query,
+      // and this string is rendered in a browser.
+      rpcLabel: config.rpc ? new URL(config.rpc.url).host : "unconfigured",
+      modelLabel: overrides.modelProvider?.id ?? "unconfigured",
+      bootedAt: Date.now(),
+      walletAddress: application.control.walletAddress,
+      policy: application.control.policy,
+      kernel: () => application.control.kernel(),
+      balances: application.control.balances,
+    },
+    auth: {
+      bearerToken: config.auth.bearerToken,
+      bearerTokenSha256: config.auth.bearerTokenSha256,
+      scopes: config.auth.scopes,
+    },
+  });
   app.addHook("onClose", async () => application.stop());
   return app;
 }

@@ -11,11 +11,21 @@
     />
     <title>ARI OS Control</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <!--
+      Typefaces are self-hosted from /fonts (see web/src/styles/fonts.css). The
+      console must not fetch from a third party: it runs on operator hardware,
+      often without egress, behind default-src 'self'. Do not reintroduce a CDN.
+      Same-origin preload for the two faces that paint first — the body face and
+      the italic of the ARI mark. crossorigin is required even same-origin, or the
+      font is fetched twice.
+    -->
+    <link rel="preload" href="/fonts/inter-var.woff2" as="font" type="font/woff2" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Instrument+Serif:ital@0;1&family=Inter:wght@400;500;600&display=swap"
-      rel="stylesheet"
+      rel="preload"
+      href="/fonts/instrument-serif-400-italic.woff2"
+      as="font"
+      type="font/woff2"
+      crossorigin
     />
   </head>
   <body>

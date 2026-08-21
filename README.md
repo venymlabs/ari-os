@@ -37,6 +37,7 @@ The result is an agent runtime that can stay online, recover after a crash, proc
 | Authorization | One-time envelopes bound to transaction, recent blockhash, policy, approval, and simulation |
 | Interfaces | Authenticated Fastify API, resumable SSE, local/remote CLI, Telegram long polling |
 | Extensibility | Signed plugin manifests, capability mediation, isolated plugin workers |
+| Console | Self-served operator dashboard on the daemon's own origin, strict CSP, session auth |
 | Operations | Health, metrics, audit roots, Docker, Compose, systemd units, migration tools |
 
 ## How it fits together
@@ -179,8 +180,47 @@ The standalone server provides:
 | `POST /v1/trading/executions/:id/approve` | Submit operator approval proof | `trading:approve` |
 | `POST /v1/trading/executions/:id/submit` | Authorize, sign, and broadcast | `trading:submit` |
 | `POST /v1/trading/reconcile` | Recover and reconcile pending executions | `trading:reconcile` |
+| `GET /` | Operator console (single-page app) | Public shell, authenticated data |
+| `POST /api/session` | Exchange the bearer token for a session cookie | Bearer token |
+| `GET /api/snapshot` | One console snapshot | `agent:read` |
+| `GET /api/stream` | Console snapshots over SSE | `agent:read` |
+| `GET /api/sources` | Which snapshot panels are backed by a real source | `agent:read` |
+| `POST /api/policy/kill-switch` | Engage or release the kernel hard stop | `trading:execute` |
+| `POST /api/policy/execution` | Arm or disarm execution (dry-run toggle) | `trading:execute` |
+| `POST /api/approvals/:id/decide` | Decide one pending intent | `trading:approve` |
+| `POST /api/strategies/:id/status` | Pause or resume a strategy runner | `trading:execute` |
 
 Bind the server to localhost by default. Put it behind TLS and a trusted identity-aware reverse proxy before exposing it to a network.
+
+## Operator console
+
+The daemon serves its own control panel. One process: `npm start` and the
+console is at `http://127.0.0.1:8787/`, its API at `/api` on the same origin.
+There is no second deployment and no CORS.
+
+```bash
+npm run dashboard:build   # builds web/ into web/dist (shipped in the package)
+npm start                 # serves the console and the API from one port
+```
+
+The console is served under `default-src 'self'` with no external host in the
+policy: the typefaces are self-hosted, the film grain is an inline `data:` URI,
+and `connect-src` is this origin only.
+
+Authentication is the existing bearer token. A browser cannot set an
+`Authorization` header on `EventSource`, so `/login` exchanges the token once
+for an `HttpOnly; SameSite=Strict` session cookie; every `/api` route also
+accepts `Authorization: Bearer` directly for curl and the CLI. **With no
+`API_BEARER_TOKEN` or `API_BEARER_TOKEN_SHA256` configured, no session can be
+minted and every `/api` route refuses with `401 AUTH_NOT_CONFIGURED`** — the
+approvals endpoint included. The console can lower authority but never raise it:
+`EXECUTION_MODE` remains the ceiling, so a browser session can disarm execution
+but cannot arm a process that was not started live.
+
+`GET /api/sources` reports which panels are backed by a real source in this
+build. Approvals, strategies, signals, perp/DLMM position legs and USD
+valuation have no source in this repo yet and report an explicit unavailable
+state rather than a plausible-looking zero.
 
 ## Telegram
 
@@ -294,7 +334,10 @@ src/
 ├── plugins/        signed manifests and sandbox host
 ├── storage/        durable SQLite stores
 ├── telegram/       polling and offset management
+├── control/        the operator console's API, auth, CSP and static serving
 └── bin/            server-adjacent operational entrypoints
+
+web/                the console itself: its own package, lockfile and audit
 ```
 
 Deeper references:

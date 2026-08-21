@@ -66,9 +66,11 @@ import { USDC_DECIMALS } from "../kernel/money.js";
 import type {
   LandMode,
   PolicyConfig,
+  SolanaReader,
   ToolContext,
   WalletProvider,
 } from "../kernel/contracts.js";
+import { PolicyController } from "../control/policy.js";
 import { defaultPerpsPolicy, DriftVenue } from "../perps/index.js";
 import type { PerpsPolicy } from "../perps/index.js";
 import {
@@ -153,6 +155,24 @@ export interface ApplicationHealth {
     trading: DependencyHealth;
   };
 }
+/**
+ * What the operator console reads and writes.
+ *
+ * `policy` is the live handle the money path re-reads, so the console's kill
+ * switch and dry-run toggle are the real ones. `kernel()` opens the kernel
+ * database LAZILY — a process that never serves a dashboard never opens a
+ * second SQLite handle — and returns the venue composition's store when one is
+ * already open, so there is never a second writer.
+ */
+export interface ControlSurface {
+  policy: PolicyController;
+  /** base58 pubkey when custody is mounted; null in the default daemon. */
+  walletAddress: string | null;
+  /** Chain reads for the wallet panel; absent when custody is unmounted. */
+  balances?: SolanaReader;
+  kernel(): KernelStore | undefined;
+}
+
 export interface Application {
   start(): Promise<void>;
   ready(): boolean;
@@ -162,6 +182,8 @@ export interface Application {
   runtime: AgentRuntime;
   runs: DurableRunStore;
   trading?: TradingOrchestrator;
+  /** The operator console's view of this process. Always present. */
+  control: ControlSurface;
 }
 export interface TradingComposition {
   trading: TradingOrchestrator;
@@ -768,11 +790,42 @@ export function createTradingComposition(
 interface VenueComposition {
   mounts: VenueMounts;
   store: KernelStore;
+  /** The read side of the cluster, for the operator console's wallet panel. */
+  reader: SolanaReader;
+}
+
+/**
+ * The kernel policy this process boots with.
+ *
+ * Built once and handed to a {@link PolicyController} so the operator console
+ * and the money path read the SAME object — a kill switch the console engages
+ * has to be the kill switch `staticGuards` re-reads, or it is theatre.
+ *
+ * The mint allowlist is only adopted when every configured entry is a real
+ * base58 mint. `src/config/` still validates EVM addresses, and quietly turning
+ * those into a Solana allowlist would refuse everything for a reason no
+ * operator could read. Spend caps and the signer policy still bind.
+ */
+function kernelPolicyFor(config: AppConfig): PolicyConfig {
+  const configuredMints = config.trading?.allowedTokens ?? [];
+  const mintAllowlist =
+    configuredMints.length > 0 && configuredMints.every(isPublicKey)
+      ? [...configuredMints]
+      : null;
+  return {
+    ...defaultPolicy(),
+    executionEnabled: config.trading?.liveEnabled ?? false,
+    ...(config.trading
+      ? { maxSlippageBps: config.trading.maxSlippageBps }
+      : {}),
+    mintAllowlist,
+  };
 }
 
 function createVenueComposition(
   config: AppConfig,
   wallet: WalletProvider,
+  policyController: PolicyController,
 ): VenueComposition | undefined {
   if (!config.rpc || !isPublicKey(wallet.pubkey)) return undefined;
   const cluster = CLUSTER_FOR_NETWORK[config.network];
@@ -790,19 +843,6 @@ function createVenueComposition(
   // base58 mint. `src/config/` still validates EVM addresses, and quietly
   // turning those into a Solana allowlist would refuse everything for a reason
   // no operator could read. Spend caps and the signer policy still bind.
-  const configuredMints = config.trading?.allowedTokens ?? [];
-  const mintAllowlist =
-    configuredMints.length > 0 && configuredMints.every(isPublicKey)
-      ? [...configuredMints]
-      : null;
-  const kernelPolicy: PolicyConfig = {
-    ...defaultPolicy(),
-    executionEnabled: config.trading?.liveEnabled ?? false,
-    ...(config.trading
-      ? { maxSlippageBps: config.trading.maxSlippageBps }
-      : {}),
-    mintAllowlist,
-  };
   const perps = {
     venue: new DriftVenue({
       connection,
@@ -819,18 +859,24 @@ function createVenueComposition(
     // `perpsEnabled` is false in the default policy, so perps tools read and
     // propose but every opening guard refuses until an operator arms them.
     policy: (): PerpsPolicy => defaultPerpsPolicy(),
-    killSwitch: () => false,
-    executionEnabled: () => kernelPolicy.executionEnabled,
+    // The console's kill switch is one switch: it must stop the venue path as
+    // well as the swap path, so both read the same live policy.
+    killSwitch: () => policyController.get().killSwitch,
+    executionEnabled: () => policyController.get().executionEnabled,
     collateral: () => ({
       mint: DRIFT_SETTLEMENT_MINT,
       decimals: USDC_DECIMALS,
     }),
   };
   const positions = perpsPositionReader({ perps });
+  // From here the policy is live: the gateway re-reads it at the metal on every
+  // execute, so the console's toggles change what this process will actually
+  // do rather than just what it displays.
+  policyController.markEnforced();
   const gateway = new TradeGatewayImpl({
     store: kernelStore,
     wallet,
-    policy: () => kernelPolicy,
+    policy: () => policyController.get(),
     mints: solana,
     balances: solana,
     simulator: solana,
@@ -856,6 +902,7 @@ function createVenueComposition(
   };
   return {
     store: kernelStore,
+    reader: solana,
     mounts: {
       // `confirmedByUser` is deliberately unwired: this process has no
       // per-invocation human-confirmation channel, and the default of `false`
@@ -932,9 +979,31 @@ export function createApplication(
       simulation: { simulate: (input) => simulator.simulate(input) },
     };
   }
+  const policyController = new PolicyController(kernelPolicyFor(config), {
+    // The boot-time triple opt-in in `src/config/` is the ceiling. A browser
+    // session can lower authority but never raise it past what the process was
+    // started with.
+    canArm: config.trading?.liveEnabled ?? false,
+  });
   const venues = overrides.wallet
-    ? createVenueComposition(config, overrides.wallet)
+    ? createVenueComposition(config, overrides.wallet, policyController)
     : undefined;
+  // Opened only if something actually asks for it (the console), and never
+  // twice: when the venue composition already holds the kernel, that instance
+  // is the one handed out.
+  let lazyKernel: KernelStore | undefined;
+  const control: ControlSurface = {
+    policy: policyController,
+    walletAddress: overrides.wallet?.pubkey ?? null,
+    ...(venues ? { balances: venues.reader } : {}),
+    kernel() {
+      if (venues) return venues.store;
+      if (state === "stopped") return undefined;
+      if (!lazyKernel)
+        lazyKernel = new KernelStore(join(config.dataDir, "kernel.sqlite"));
+      return lazyKernel;
+    },
+  };
   const registry = registerBuiltInTools(new ToolRegistry(), {
     ...composed,
     ...overrides.tools,
@@ -969,6 +1038,7 @@ export function createApplication(
     registry,
     runtime,
     runs,
+    control,
     ...(tc ? { trading: tc.trading } : {}),
     async start() {
       if (state === "ready") return;
@@ -1025,6 +1095,8 @@ export function createApplication(
       if (reconciliationTimer) clearInterval(reconciliationTimer);
       tc?.close();
       venues?.store.close();
+      lazyKernel?.close();
+      lazyKernel = undefined;
       noxaStore?.close();
       sessions?.close();
       runs.close();

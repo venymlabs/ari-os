@@ -13,6 +13,7 @@
   },
   "files": [
     "dist",
+    "web/dist",
     "README.md",
     "docs",
     "compose.yaml",
@@ -51,13 +52,14 @@
     "signer": "node dist/bin/signer.js",
     "setup:trading": "node dist/bin/robinhood-agent-os.js setup",
     "trading:reconcile": "node dist/bin/robinhood-agent-os.js trade reconcile",
-    "dashboard:build": "node -e \"console.log('dashboard not included in phases 0-5')\""
+    "dashboard:build": "npm --prefix web ci && npm --prefix web run build"
   },
   "overrides": {
     "uuid": "^11.1.1"
   },
   "dependencies": {
     "@fastify/cors": "^11.3.0",
+    "@fastify/static": "^10.1.3",
     "@solana/web3.js": "^1.98.4",
     "bs58": "^6.0.0",
     "fastify": "^5.10.0",
