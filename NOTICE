@@ -64,6 +64,22 @@ Files derived from Aetheria
   src/chains/solana/local-wallet.ts from packages/wallet/src/local-wallet.ts
   src/chains/solana/rpc.ts          from packages/integrations/src/rpc.ts
 
+  src/chains/solana/spl.ts is NOT derived from Aetheria and is not covered by
+  Apache-2.0. It is a clean-room MIT file written for ARI OS to replace the
+  `@solana/spl-token` dependency: three public on-chain program addresses and
+  one instruction built from the Associated Token Account program's documented
+  wire format. See THIRD_PARTY_NOTICES.md. tests/solana-spl.test.ts is likewise
+  new and MIT.
+
+  Every file under src/perps/ and src/pools/ is derived from the identically
+  named file under packages/perps/src/ and packages/pools/src/ respectively,
+  with these exceptions:
+
+  src/perps/settle.ts               NEW in ARI OS — see below
+  src/pools/signals.ts              from packages/data/src/signals-engine.ts
+                                         (the RugHeat reading and its source
+                                         port only, not the engine)
+
 Tests derived from Aetheria
 ───────────────────────────
 
@@ -72,6 +88,24 @@ Tests derived from Aetheria
   tests/kernel-store.test.ts        (process-lock cases) from
                                          packages/kernel/src/lock.test.ts
   tests/kernel-invariants.test.ts   drives packages/kernel/src/selfcheck/run.ts
+  tests/perps-exposure.test.ts      from packages/perps/src/exposure.test.ts
+  tests/perps-guards.test.ts        from packages/perps/src/guards.test.ts
+  tests/perps-intent.test.ts        from packages/perps/src/intent.test.ts
+  tests/perps-liquidation.test.ts   from packages/perps/src/liquidation.test.ts
+  tests/perps-drift-convert.test.ts from packages/perps/src/drift/convert.test.ts
+  tests/perps-drift-venue.test.ts   from packages/perps/src/drift/drift-venue.test.ts
+  tests/perps-tools.test.ts         from packages/perps/src/tools/tools.test.ts
+  tests/pools-guards.test.ts        from packages/pools/src/guards.test.ts
+  tests/pools-meteora-bins.test.ts  from packages/pools/src/meteora/bins.test.ts
+  tests/pools-pumpfun-curve.test.ts from packages/pools/src/pumpfun/curve.test.ts
+  tests/pools-pumpfun-instructions.test.ts
+                                    from packages/pools/src/pumpfun/instructions.test.ts
+  tests/pools-pumpfun-math.test.ts  from packages/pools/src/pumpfun/math.test.ts
+  tests/pools-rebalance-decide.test.ts
+                                    from packages/pools/src/rebalance/decide.test.ts
+  tests/pools-tools.test.ts         from packages/pools/src/tools/tools.test.ts
+  tests/kernel-perp-settle.test.ts  NEW in ARI OS — covers the venue-position
+                                         settle branch
 
 Modifications made (Apache-2.0 §4(b))
 ─────────────────────────────────────
@@ -93,4 +127,34 @@ Modifications made (Apache-2.0 §4(b))
     rebranded from Aetheria to ARI OS; behaviour unchanged.
   * `src/chains/solana/rpc.ts` — the constructor also accepts an existing
     `Connection` so the read ports can be exercised without a live RPC.
+  * `src/kernel/contracts.ts` — `IntentKind` widened from the literal `'swap'`
+    to the four perp kinds and the eight pool/curve kinds; `TradeIntent` gained
+    an optional `perp` leg; the `PositionReader` port and `SettleMode` were
+    added. The Aetheria `shared` tool contract (`ToolContext`, `Preview`,
+    `ToolDefinition`) IS now carried over after all, since `src/perps` and
+    `src/pools` are written against it — renamed to `IntentToolDefinition` /
+    `ToolOutcome` so it does not collide with ARI OS's own registry contract in
+    `src/agent/types.ts`.
+  * `src/kernel/policy-engine.ts` — the "input amount must be positive" rule is
+    gated on the intent kind so a perp reduce/close (which posts no collateral)
+    is not refused, and the bps-of-notional priority-fee ceiling is skipped when
+    the input leg is zero for the same reason. Every other guard is unchanged.
+  * `src/kernel/trade-gateway.ts` — added the `venue-position` settle branch:
+    perp kinds are verified against the venue position delta rather than a token
+    balance delta, and a perp intent with no `PositionReader` mounted is refused
+    before broadcast.
+  * `src/perps/intent.ts` — the `IntentKind` cast in `asTradeIntent` is gone
+    (the widened kernel types make it unnecessary), and the doc comment that
+    described the missing perp settle now describes the implemented one.
+  * `src/pools/intent.ts` — pool intents declare their real kind (`lp_open`,
+    `curve_buy`, …) instead of flattening to `'swap'`.
+  * `src/perps/*`, `src/pools/*` — `node:test` replaced with vitest in the
+    ported tests, which moved from co-located `*.test.ts` into `tests/`;
+    optional interface properties widened to `?: T | undefined` where ARI OS's
+    `exactOptionalPropertyTypes` requires it; three latent unused-binding lint
+    errors fixed.
+  * `@drift-labs/sdk` and `@meteora-ag/dlmm` are declared as OPTIONAL peer
+    dependencies rather than dependencies, so they stay out of the lockfile and
+    out of `npm audit --omit=dev`; the lazy loaders' error text names the npm
+    install command.
   * Source formatting normalised to ARI OS's Prettier configuration.

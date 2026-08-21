@@ -5,6 +5,7 @@ import { getAddress } from "viem";
 import type { UserRequest } from "./index.js";
 import type { DecisionInput } from "../execution/approvals/index.js";
 import type { TradeSide, TradingOrchestrator } from "../live-trading/index.js";
+import { isPublicKey } from "../signer/transaction.js";
 
 type Rpc = (method: string, params: unknown[]) => Promise<any>;
 type Trading = Pick<
@@ -29,7 +30,20 @@ type C = {
     args: Record<string, string | boolean>,
   ) => Promise<unknown>;
 };
-const ROUTER = "0xcaf681a66d020601342297493863e78c959e5cb2";
+/**
+ * The default setup policy, deliberately narrow.
+ *
+ * ComputeBudget fees plus SPL Token `Revoke` — the one instruction that can
+ * only ever reduce what someone else may move, and the reason `trade revoke`
+ * works out of the box. `Revoke` is classified `effect: "none"` because it is
+ * incapable of moving value; every value-moving program is left OUT, so a swap
+ * requires the operator to add the program, pin its discriminator, and write an
+ * input-leg cap for the mint by hand. See docs/TRADING.md §3.
+ */
+const COMPUTE_BUDGET_PROGRAM = "ComputeBudget111111111111111111111111111111";
+const TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+/** All-zero Ed25519 public key: the placeholder an operator must replace. */
+const UNSET_ACCOUNT = "11111111111111111111111111111111";
 const json = (x: unknown) =>
   JSON.stringify(x, (_k, v) => (typeof v === "bigint" ? v.toString() : v), 2);
 async function exists(p: string) {
@@ -54,6 +68,10 @@ const integer = (a: Record<string, string | boolean>, key: string) => {
   const v = required(a, key);
   if (!/^\d+$/.test(v)) throw Error(`${key} must be a non-negative integer`);
   return BigInt(v);
+};
+const mint = (v: string, key: string) => {
+  if (!isPublicKey(v)) throw Error(`${key} must be a base58 Solana address`);
+  return v;
 };
 export async function createOperatorDecisionProof(
   path: string,
@@ -103,12 +121,10 @@ export function createUserWorkflow(c: C) {
     await mkdir(c.dataDir, { recursive: true, mode: 0o700 });
     if (req.group === "setup") {
       const force = req.args.force === true,
-        account = getAddress(
-          String(
-            req.args.account ?? "0x0000000000000000000000000000000000000000",
-          ),
-        ),
+        account = String(req.args.account ?? UNSET_ACCOUNT),
         socket = join(c.dataDir, "signer.sock");
+      if (!isPublicKey(account))
+        throw Error("account must be a base58 Solana public key");
       const files: { name: string; value: string }[] = [
         {
           name: "config.json",
@@ -125,28 +141,53 @@ export function createUserWorkflow(c: C) {
           name: "policy.json",
           value: json({
             version: 1,
-            maxAmountIn: "1000000000000000000",
+            // 1 SOL in lamports. Every amount is base units of the mint
+            // LEAVING the wallet — the input leg — so no price oracle sits in
+            // the safety path.
+            maxAmountIn: "1000000000",
             maxSlippageBps: 100,
             approvalRequired: true,
-            finalityBlocks: 12,
-            allowedTokens: [],
+            // Solana has no confirmation depth to count: `finalized` is rooted.
+            finalityCommitment: "finalized",
+            allowedMints: [],
           }),
         },
         {
           name: "sign-policy.json",
           value: json({
             version: 1,
-            chainIds: [4663],
-            accounts: [account],
-            to: [ROUTER],
-            maxValue: "0",
-            maxGas: "500000",
-            maxFeePerGas: "100000000000",
-            maxPriorityFeePerGas: "5000000000",
-            // exactInputSingle, exactInput, and ERC-20 approve — the last
-            // one so `trade revoke` can clear allowances once the token
-            // contract is added to `to`.
-            dataPrefixes: ["0x04e45aaf", "0xb858183f", "0x095ea7b3"],
+            cluster: "mainnet-beta",
+            feePayers: [account],
+            programs: [
+              {
+                programId: COMPUTE_BUDGET_PROGRAM,
+                discriminator: "02",
+                effect: "fee",
+              },
+              {
+                programId: COMPUTE_BUDGET_PROGRAM,
+                discriminator: "03",
+                effect: "fee",
+              },
+              {
+                programId: TOKEN_PROGRAM,
+                discriminator: "05",
+                effect: "none",
+              },
+            ],
+            // No spend instruction is allowed by default, so no asset may
+            // leave beyond the capped fee. `native` is lamports.
+            caps: { native: "0" },
+            maxInstructions: 8,
+            maxAccountKeys: 32,
+            maxRequiredSignatures: 1,
+            maxComputeUnitLimit: 400000,
+            maxComputeUnitPriceMicroLamports: "50000",
+            maxPriorityFeeLamports: "15000",
+            // Empty means any transaction carrying a lookup table is refused:
+            // the signer cannot resolve looked-up addresses without trusting
+            // an external RPC.
+            addressLookupTables: [],
           }),
         },
         ...[
@@ -196,8 +237,8 @@ export function createUserWorkflow(c: C) {
     if (req.action === "quote")
       return c.trading.quote({
         side: String(a.side ?? "buy") as TradeSide,
-        tokenIn: getAddress(required(a, "tokenIn")),
-        tokenOut: getAddress(required(a, "tokenOut")),
+        inputMint: mint(required(a, "tokenIn"), "tokenIn"),
+        outputMint: mint(required(a, "tokenOut"), "tokenOut"),
         amountIn: integer(a, "amountIn"),
         slippageBps: Number(required(a, "slippage")),
       });
@@ -209,14 +250,13 @@ export function createUserWorkflow(c: C) {
       });
     if (req.action === "revoke") {
       if (!c.trading.revoke) throw Error("revoke unavailable in this mode");
-      return c.trading.revoke(
-        getAddress(required(a, "token")) as `0x${string}`,
-        {
-          idempotencyKey: required(a, "idempotencyKey"),
-          actor: String(a.actor ?? "cli"),
-          dryRun: a.live !== true,
-        },
-      );
+      // `--token` is the token ACCOUNT whose delegate is being cleared, not the
+      // mint: SPL `Revoke` acts on the account that holds the delegation.
+      return c.trading.revoke(mint(required(a, "token"), "token"), {
+        idempotencyKey: required(a, "idempotencyKey"),
+        actor: String(a.actor ?? "cli"),
+        dryRun: a.live !== true,
+      });
     }
     if (req.action === "approve" || req.action === "deny") {
       const id = required(a, "id"),

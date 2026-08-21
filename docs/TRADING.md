@@ -4,7 +4,7 @@
 
 ## 1. Clone, verify, and initialize
 
-Requires Node.js 22+, npm, a Robinhood Chain mainnet RPC, and a dedicated Unix account.
+Requires Node.js 22+, npm, a Solana mainnet-beta RPC, and a dedicated Unix account.
 
 ```bash
 git clone https://github.com/venymlabs/ari-os.git robinhood-agent-os
@@ -14,7 +14,7 @@ npm run verify
 umask 077
 export DATA_DIR="$HOME/.local/state/robinhood-agent-os"
 install -d -m 0700 "$DATA_DIR"
-npm run setup:trading -- --account 0xYourDedicatedWallet --rpc https://YOUR_MAINNET_RPC
+npm run setup:trading -- --account <yourDedicatedWalletPubkey> --rpc https://YOUR_MAINNET_RPC
 ```
 
 Setup creates mode-0600 `config.json`, `policy.json`, `sign-policy.json`, `signer.token`, `api.token`, `authorization.key`, and `operator.key`. It refuses to overwrite them unless `--force` is explicitly supplied. The JSON files are setup artifacts for operator review; runtime settings are supplied through the environment described below.
@@ -51,7 +51,7 @@ Confirm that the address printed by `status` is exactly `TRADING_ACCOUNT`. It is
 
 ## 3. Review the two policies
 
-`policy.json` controls the trading orchestrator. Runtime equivalents are `TRADING_MAX_AMOUNT_IN`, `TRADING_ALLOWED_TOKENS`, `TRADING_MAX_SLIPPAGE_BPS`, and `TRADING_FINALITY_BLOCKS`. Amounts are base-unit decimal integers; token allowlists are comma-separated addresses. `TRADING_MAX_AMOUNT_IN` is enforced independently in each token's native units; raw units from different tokens or decimal scales are never summed. Aggregate exposure is disabled unless the adapter supplies a single quote denomination with explicit decimals and price/valuation evidence.
+`policy.json` controls the trading orchestrator. Runtime equivalents are `TRADING_MAX_AMOUNT_IN`, `TRADING_ALLOWED_TOKENS`, and `TRADING_MAX_SLIPPAGE_BPS`. Amounts are base-unit decimal integers; the allowlist is a comma-separated list of base58 mints. `TRADING_MAX_AMOUNT_IN` is enforced independently in each mint's base units; raw units from different mints or decimal scales are never summed. Finality is a commitment level, not a depth: `TRADING_FINALITY_BLOCKS` has no Solana meaning and is ignored — an execution is final when the cluster reports it `finalized`. Aggregate exposure is disabled unless the adapter supplies a single quote denomination with explicit decimals and price/valuation evidence.
 
 `sign-policy.json` is independently enforced by the signer. It binds the cluster, the allowed fee payers, the allowed program IDs, the allowed instruction discriminators within each program, per-asset spend caps, and the compute-unit/priority-fee ceilings.
 
@@ -59,7 +59,7 @@ Every allowed instruction must be classified by `effect`: `spend` (with a rule s
 
 A transaction carrying an address lookup table is refused unless that table is pinned in `addressLookupTables`, because the signer cannot resolve looked-up addresses without trusting an external RPC. Even when pinned, an instruction whose program ID or capped mint resolves through a lookup table is still refused. Verify every program ID, discriminator, and limit against the exact intended trading flow before funding, and never allow a program without pinning its discriminators.
 
-Until `npm run setup:trading` is ported to Solana it still emits the retired EVM policy shape; the signer refuses to start on it with `policy_format_invalid`. Write `sign-policy.json` by hand for now — a minimal, deliberately narrow example:
+`npm run setup:trading` emits a valid but deliberately useless policy: ComputeBudget fees plus SPL Token `Revoke`, no spend instruction, and `caps.native` of `0`. It authorizes `trade revoke` and nothing else, so a swap requires you to add the program, pin its discriminator, and write an input-leg cap by hand. Here is that shape with one spend rule filled in:
 
 ```json
 {
@@ -102,7 +102,7 @@ Until `npm run setup:trading` is ported to Solana it still emits the retired EVM
 
 `discriminator` is the lowercase hex prefix of the instruction data (`0c` is SPL Token `TransferChecked`; `02`/`03` are ComputeBudget `SetComputeUnitLimit`/`SetComputeUnitPrice`). `mintAccountIndex` is the index within that instruction's own account list where the mint appears; the signer verifies it matches `asset` before applying the cap, and refuses if the mint is not verifiable. `caps` and `maxPriorityFeeLamports` are decimal strings of base units, `native` meaning lamports.
 
-Contract provenance and current addresses are in [PRODUCTION-CONTRACTS.md](PRODUCTION-CONTRACTS.md). Re-run its live read-only checks before deployment.
+Program provenance and current addresses are in [PRODUCTION-CONTRACTS.md](PRODUCTION-CONTRACTS.md). Re-run its live read-only checks before deployment.
 
 ## 4. Configure live mode and approval proof keys
 
@@ -120,11 +120,10 @@ export MAINNET_ACKNOWLEDGE_RISK=I_ACKNOWLEDGE_MAINNET_RISK
 export LIVE_TRADING_ENABLED=true
 export LIVE_TRADING_ACKNOWLEDGE_RISK=I_ACKNOWLEDGE_LIVE_TRADING_RISK
 
-export TRADING_ACCOUNT=0xYourDedicatedWallet
+export TRADING_ACCOUNT=<yourDedicatedWalletPubkey>
 export TRADING_MAX_AMOUNT_IN=1000000
-export TRADING_ALLOWED_TOKENS=0xInputToken,0xOutputToken
+export TRADING_ALLOWED_TOKENS=<inputMint>,<outputMint>
 export TRADING_MAX_SLIPPAGE_BPS=50
-export TRADING_FINALITY_BLOCKS=12
 export TRADING_RECONCILE_INTERVAL_MS=15000
 
 export SIGNER_SOCKET_PATH="$DATA_DIR/signer.sock"
@@ -166,7 +165,7 @@ curl -fsS http://127.0.0.1:8787/livez
 curl -fsS http://127.0.0.1:8787/readyz
 ```
 
-Startup probes chain identity, verified contract bytecode, and the signer; it also recovers/reconciles durable executions and schedules periodic reconciliation. A non-ready service must not receive trading traffic.
+Startup probes the cluster genesis hash and the signer's identity, policy hash and authorization key id; it also recovers/reconciles durable executions and schedules periodic reconciliation. A non-ready service must not receive trading traffic.
 
 ## 6. Clone-to-trade CLI flow
 
@@ -175,7 +174,7 @@ The local CLI opens the same durable state and uses the configured RPC/signer co
 ```bash
 # Quote and create a REAL execution. Omitting --live creates a dry-run execution.
 npm run cli -- trade quote --side buy \
-  --token-in 0xInputToken --token-out 0xOutputToken \
+  --token-in <inputMint> --token-out <outputMint> \
   --amount-in 1000000 --slippage 50
 npm run cli -- trade buy --quote-id <quoteId> \
   --idempotency-key buy-001 --actor strategy --live
@@ -196,13 +195,14 @@ For a sell, use `trade quote --side sell`, then `trade sell ... --live`. To reje
 npm run cli -- trade deny --id <executionId> --reason "operator rejected"
 ```
 
-To clear a router allowance, use `trade revoke`. It pins the exact
-`approve(router, 0)` transaction for the token and pushes it through the
+To clear a delegate, use `trade revoke`. It pins the exact SPL Token
+`Revoke` transaction for that token account and pushes it through the
 same lifecycle as a swap: risk assessment, exact-transaction operator
 approval, a one-time authorization envelope, and the isolated signer.
+`--token` is the token **account** holding the delegation, not the mint.
 
 ```bash
-npm run cli -- trade revoke --token <tokenAddress> \
+npm run cli -- trade revoke --token <tokenAccountPubkey> \
   --idempotency-key revoke-001 --live
 npm run cli -- trade approve --id <executionId>
 npm run cli -- trade submit --id <executionId>

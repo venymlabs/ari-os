@@ -5,6 +5,7 @@ import { getAddress, type Address } from "viem";
 import { z } from "zod";
 import { NOXA_FACTORY_ADDRESS, NOXA_FACTORY_START_BLOCK } from "../noxa.js";
 import { permissionsAreUnsafe } from "../platform.js";
+import { isPublicKey } from "../signer/transaction.js";
 const boolean = z.enum(["true", "false"]).transform((v) => v === "true");
 const url = z
   .string()
@@ -73,7 +74,12 @@ const schema = z
   })
   .passthrough();
 export interface TradingConfig {
-  account: Address;
+  /**
+   * The signing wallet. Accepts a base58 Ed25519 public key (Solana) or a
+   * checksummed EVM address; the rest of this module is the last EVM-shaped
+   * surface in the tree and is retired with `src/chain.ts` and `src/noxa.ts`.
+   */
+  account: string;
   router: Address;
   quoter: Address;
   factory: Address;
@@ -81,7 +87,8 @@ export interface TradingConfig {
   signerTokenPath?: string;
   signerPolicyPath?: string;
   maxAmountIn: bigint;
-  allowedTokens: Address[];
+  /** Tradeable assets: base58 mints, or EVM token addresses. */
+  allowedTokens: string[];
   maxSlippageBps: number;
   finalityBlocks: number;
   reconcileIntervalMs: number;
@@ -133,6 +140,17 @@ const address = (v: string, n: string) => {
     throw Error(`${n} is invalid`);
   }
 };
+/**
+ * A wallet or asset identifier on either chain family.
+ *
+ * base58 Solana public keys pass through verbatim (case is significant — two
+ * keys differing only in case are two different wallets); anything else must be
+ * a checksummable EVM address. Accepting both is what lets the Solana execution
+ * path be configured while `NOXA_*`, `CHAIN_ID` and the EVM read surface are
+ * still shipped.
+ */
+const walletOrAsset = (v: string, n: string) =>
+  isPublicKey(v) ? v : address(v, n);
 const privateFile = (p: string, n: string) => {
   if (!isAbsolute(p)) throw Error(`${n} must be absolute`);
   const s = lstatSync(p);
@@ -236,7 +254,7 @@ export function loadConfig(
     }
     if (!e.RPC_URL) throw Error("RPC_URL is required");
     trading = {
-      account: address(e.TRADING_ACCOUNT, "TRADING_ACCOUNT"),
+      account: walletOrAsset(e.TRADING_ACCOUNT, "TRADING_ACCOUNT"),
       router: address(contracts.router, "router"),
       quoter: address(contracts.quoter, "quoter"),
       factory: address(contracts.factory, "factory"),
@@ -250,7 +268,7 @@ export function loadConfig(
       maxAmountIn: e.TRADING_MAX_AMOUNT_IN,
       allowedTokens: (
         e.TRADING_ALLOWED_TOKENS?.split(",").filter(Boolean) ?? []
-      ).map((x) => address(x, "TRADING_ALLOWED_TOKENS")),
+      ).map((x) => walletOrAsset(x, "TRADING_ALLOWED_TOKENS")),
       maxSlippageBps: e.TRADING_MAX_SLIPPAGE_BPS,
       finalityBlocks: e.TRADING_FINALITY_BLOCKS,
       reconcileIntervalMs: e.TRADING_RECONCILE_INTERVAL_MS,

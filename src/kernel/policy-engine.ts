@@ -6,6 +6,11 @@
  */
 
 import type { PolicyConfig, TradeIntent } from "./contracts.js";
+import {
+  isIntentKind,
+  isPerpIntentKind,
+  postsZeroCollateral,
+} from "./contracts.js";
 import { GuardError } from "./errors.js";
 import { quoteBucketFor, slippageBps } from "./money.js";
 
@@ -39,15 +44,57 @@ export function staticGuards(
       "execution is disabled — the kernel is in dry-run; arm it before trading",
     );
   }
-  if (intent.kind !== "swap") {
+  if (!isIntentKind(intent.kind)) {
     throw new GuardError(
       "INVALID_INTENT",
       `unsupported intent kind: ${String(intent.kind)}`,
     );
   }
-  if (intent.input.amount <= 0n) {
+
+  // The input leg must be a real outflow for every kind that HAS one. A perp
+  // reduce or close posts no collateral — it hands the venue an order — so for
+  // those the rule is "never negative" rather than "always positive". The check
+  // is gated on the kind rather than dropped: any kind that spends still has to
+  // declare a positive amount, because that amount is what the caps bind to.
+  if (postsZeroCollateral(intent.kind)) {
+    if (intent.input.amount < 0n) {
+      throw new GuardError(
+        "INVALID_INTENT",
+        "input amount must not be negative",
+      );
+    }
+  } else if (intent.input.amount <= 0n) {
     throw new GuardError("INVALID_INTENT", "input amount must be positive");
   }
+
+  // A perp leg is required for a perp kind and forbidden for anything else, so
+  // no intent can reach the money path whose settle strategy is ambiguous.
+  if (isPerpIntentKind(intent.kind)) {
+    if (!intent.perp) {
+      throw new GuardError(
+        "INVALID_INTENT",
+        `intent kind ${intent.kind} is missing its perp leg`,
+      );
+    }
+    if (intent.perp.minBaseAmount > intent.perp.expectedBaseAmount) {
+      throw new GuardError(
+        "INVALID_INTENT",
+        "perp minimum base size exceeds the expected size",
+      );
+    }
+    if (intent.perp.expectedBaseAmount <= 0n) {
+      throw new GuardError(
+        "INVALID_INTENT",
+        "perp expected base size must be positive",
+      );
+    }
+  } else if (intent.perp) {
+    throw new GuardError(
+      "INVALID_INTENT",
+      `intent kind ${intent.kind} must not carry a perp leg`,
+    );
+  }
+
   if (!intent.unsignedTxBase64) {
     throw new GuardError(
       "INVALID_INTENT",
@@ -88,7 +135,11 @@ export function staticGuards(
       `priority fee ${feeLamports} lamports exceeds the ${policy.priorityFeeMaxLamports} lamport ceiling`,
     );
   }
-  if (quoteBucketFor(intent.input.mint)) {
+  // Only meaningful when there IS a notional to take a fraction of. A perp
+  // reduce or close spends nothing, which would make the ceiling 0 and refuse
+  // every exit — and blocking exits is how a safety system becomes the trap it
+  // exists to prevent. There the absolute lamport ceiling alone applies.
+  if (quoteBucketFor(intent.input.mint) && intent.input.amount > 0n) {
     const bpsCeiling =
       (intent.input.amount * BigInt(policy.priorityFeeMaxBps)) / 10_000n;
     if (feeLamports > bpsCeiling) {

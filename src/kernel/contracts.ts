@@ -7,6 +7,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { z } from "zod";
 import type { GuardCode } from "./errors.js";
 import type { TokenAmount } from "./money.js";
 
@@ -29,7 +30,76 @@ export const TRADE_STATES = [
 ] as const;
 export type TradeState = (typeof TRADE_STATES)[number];
 
-export type IntentKind = "swap";
+/**
+ * The four perpetuals kinds. `perp_reduce` / `perp_close` are *reducing*: they
+ * shrink risk, post no new collateral, and must stay reachable when an opening
+ * intent would be refused — an agent must always be able to get flat.
+ */
+export const PERP_INTENT_KINDS = [
+  "perp_open",
+  "perp_increase",
+  "perp_reduce",
+  "perp_close",
+] as const;
+export type PerpIntentKind = (typeof PERP_INTENT_KINDS)[number];
+
+/** Concentrated-liquidity and bonding-curve kinds. */
+export const POOL_INTENT_KINDS = [
+  "lp_open",
+  "lp_add",
+  "lp_remove",
+  "lp_close",
+  "lp_claim",
+  "lp_rebalance",
+  "curve_buy",
+  "curve_sell",
+] as const;
+export type PoolIntentKind = (typeof POOL_INTENT_KINDS)[number];
+
+/**
+ * Every shape of value movement the kernel knows how to chokepoint. The kind is
+ * declared by the tool and re-validated here; it selects the settle strategy
+ * (see {@link settleModeFor}) and nothing else. It never relaxes a cap.
+ */
+export const INTENT_KINDS = [
+  "swap",
+  ...PERP_INTENT_KINDS,
+  ...POOL_INTENT_KINDS,
+] as const;
+export type IntentKind = (typeof INTENT_KINDS)[number];
+
+export function isIntentKind(kind: string): kind is IntentKind {
+  return (INTENT_KINDS as readonly string[]).includes(kind);
+}
+
+export function isPerpIntentKind(kind: string): kind is PerpIntentKind {
+  return (PERP_INTENT_KINDS as readonly string[]).includes(kind);
+}
+
+/**
+ * Kinds that post zero collateral. A perp reduce or close hands the venue an
+ * order, not money: its input leg is legitimately `0n`, so the "input must be
+ * positive" rule is gated on this rather than removed. Every other kind still
+ * has to declare a real outflow — that is what the spend caps bind to.
+ */
+export function postsZeroCollateral(kind: IntentKind): boolean {
+  return kind === "perp_reduce" || kind === "perp_close";
+}
+
+/**
+ * How the gateway verifies that a confirmed transaction actually filled.
+ *
+ *  - `token-delta`   the wallet's balance of the output mint must grow by at
+ *                    least `quote.minOutAmount`. The swap-shaped default.
+ *  - `venue-position` the fill did not move a token balance at all — it moved a
+ *                    position on a venue. The gateway diffs the position
+ *                    instead, against `perp.minBaseAmount`.
+ */
+export type SettleMode = "token-delta" | "venue-position";
+
+export function settleModeFor(kind: IntentKind): SettleMode {
+  return isPerpIntentKind(kind) ? "venue-position" : "token-delta";
+}
 
 /** How a built transaction is landed on-chain. */
 export type LandMode = "jupiter-ultra" | "self-rpc";
@@ -99,6 +169,32 @@ export interface QuoteSummary {
 }
 
 /**
+ * The slice of a perp leg the KERNEL itself needs, and nothing more.
+ *
+ * `src/perps` owns the full `PerpLeg` (funding, oracle, liquidation, margin
+ * ratios); those belong to the perps guards, not to the money path. What the
+ * gateway needs is only enough to locate the position it is about to change and
+ * to bound the fill: the venue, the market, the subaccount, the direction of
+ * the order, and the expected / worst-case base size.
+ *
+ * `PerpLeg` is structurally assignable to this, so the perps package hands its
+ * own richer type straight through with no cast anywhere.
+ */
+export interface PerpSettleLeg {
+  /** Stable venue id, e.g. 'drift'. Must match the mounted PositionReader. */
+  readonly venue: string;
+  /** Canonical market symbol, e.g. 'SOL-PERP'. */
+  readonly market: string;
+  readonly accountSubId: number;
+  /** Direction of the ORDER (a close of a long is a 'short' order). */
+  readonly side: "long" | "short";
+  readonly baseDecimals: number;
+  /** Expected and worst-case filled base size — the perps analogue of out / min-out. */
+  readonly expectedBaseAmount: bigint;
+  readonly minBaseAmount: bigint;
+}
+
+/**
  * A TradeIntent is the ONLY thing a sign/spend tool may produce. It is plain,
  * journalable data — never a function, never a secret. The kernel re-validates
  * every safety-relevant field from scratch; nothing here is trusted on faith.
@@ -137,6 +233,14 @@ export interface TradeIntent {
 
   /** The route/quote, for display and the post-confirm balance-delta check. */
   readonly quote: QuoteSummary;
+
+  /**
+   * Present iff `kind` is one of {@link PERP_INTENT_KINDS}, and required then —
+   * `staticGuards` refuses a perp kind without it, and refuses a non-perp kind
+   * that carries one. A perp fill is verified against this leg rather than
+   * against a token balance; see {@link SettleMode}.
+   */
+  readonly perp?: PerpSettleLeg;
 
   /** Human-facing one-liner the tool proposes (the kernel may override on display). */
   readonly summary: string;
@@ -200,6 +304,38 @@ export interface Simulator {
 export interface BalanceReader {
   /** Owned base-unit balance of `mint` for `owner`. Native SOL is read via the WSOL sentinel mint. */
   readBalance(owner: string, mint: string): Promise<bigint>;
+}
+
+/** Which venue position a settle check is about. */
+export interface PerpPositionRef {
+  readonly venue: string;
+  readonly market: string;
+  /** base58 owner pubkey — the gateway always passes its own wallet. */
+  readonly owner: string;
+  readonly subAccountId: number;
+}
+
+/**
+ * The perp analogue of {@link BalanceReader}, and the reason a perp fill can be
+ * verified at all.
+ *
+ * A perp order does not move a token balance: collateral leaves the wallet on
+ * an open and a close returns it, so diffing balances says nothing about
+ * whether the ORDER filled. Diffing the venue position does. The gateway reads
+ * this immediately before signing and again after confirmation, and requires
+ * the signed change to move in the order's direction by at least
+ * `perp.minBaseAmount`.
+ *
+ * `src/perps/settle.ts` implements it over a `PerpsVenue`. Nothing here holds a
+ * key or builds a transaction — it is a read port like every other.
+ */
+export interface PositionReader {
+  /**
+   * Signed base-unit size of the position: positive = long, negative = short,
+   * `0n` = flat (including "no such position"). Throwing is a legitimate
+   * answer — the gateway refuses to open into an unreadable venue.
+   */
+  readPosition(ref: PerpPositionRef): Promise<bigint>;
 }
 
 export interface Broadcaster {
@@ -298,6 +434,12 @@ export interface FillReport {
   readonly inputDelta: bigint; // negative = spent
   readonly outputDelta: bigint; // positive = received
   readonly effectiveSlippageBps: number;
+  /**
+   * Perp kinds only: signed base-unit change in the venue position (positive =
+   * the position moved long). This — not `outputDelta` — is what the fill check
+   * bounds for a `venue-position` settle.
+   */
+  readonly positionDelta?: bigint;
 }
 
 export interface ExecuteResult {
@@ -376,6 +518,8 @@ export type JournalEvent =
       readonly inputDelta: string;
       readonly outputDelta: string;
       readonly effectiveSlippageBps: number;
+      /** Perp kinds only — the signed venue position change the fill was verified against. */
+      readonly positionDelta?: string;
     }
   | {
       readonly type: "trade.failed";
@@ -395,4 +539,131 @@ export type JournalEventType = JournalEvent["type"];
 
 export interface Journal {
   append(event: JournalEvent): void;
+}
+
+// ── The intent-tool contract ─────────────────────────────────────────────────
+
+/**
+ * The contract for tools that can reach the money path.
+ *
+ * This is deliberately NOT `src/agent/types.ts`'s `ToolDefinition`, which is the
+ * model-facing registry contract (JSON schema in, JSON out). The two differ in
+ * the one way that matters here: a tool defined below has a `simulate()` that
+ * returns a real, executable {@link TradeIntent} without signing anything, and
+ * an `execute()` whose ONLY route to value movement is `ctx.gateway.execute()`.
+ * That is what keeps "the model cannot move money" a structural property rather
+ * than a convention. `src/tools/` adapts these onto the agent registry.
+ */
+
+export const TOOL_CAPABILITIES = [
+  "read",
+  "sign",
+  "spend",
+  "network",
+  "read_state",
+  "write_state",
+] as const;
+export type ToolCapability = (typeof TOOL_CAPABILITIES)[number];
+
+export const TOOL_CATEGORIES = [
+  "data",
+  "swap",
+  "perps",
+  "lending",
+  "lp",
+  "launchpad",
+  "staking",
+  "nft",
+  "wallet",
+  "notify",
+] as const;
+export type ToolCategory = (typeof TOOL_CATEGORIES)[number];
+
+export interface ToolLogger {
+  info(msg: string, meta?: Record<string, unknown>): void;
+  warn(msg: string, meta?: Record<string, unknown>): void;
+  error(msg: string, meta?: Record<string, unknown>): void;
+  debug(msg: string, meta?: Record<string, unknown>): void;
+}
+
+/** The bundle of read-only clients available to a tool at runtime. */
+export interface ToolServices {
+  readonly solana: SolanaReader;
+  readonly jupiter: JupiterClient;
+}
+
+/**
+ * Per-invocation context. Venue handles are deliberately NOT here: a venue is a
+ * composition-time singleton with its own policy getters and guard config, so
+ * the venue-backed tools are factories closed over their dependencies (see
+ * `src/perps/tools/deps.ts` and `src/pools/tools/deps.ts`) and satisfy this
+ * context unchanged.
+ */
+export interface ToolContext {
+  /** base58 pubkey of the on-machine wallet. */
+  readonly ownerWallet: string;
+  readonly rpcUrl: string;
+  readonly services: ToolServices;
+  /** The ONLY path to value movement. A read-only tool is handed a gateway that rejects execution. */
+  readonly gateway: TradeGateway;
+  readonly log: ToolLogger;
+  readonly signal: AbortSignal | undefined;
+}
+
+/** What a `simulate()` returns — a real quote, never a signature. */
+export interface Preview {
+  readonly summary: string;
+  readonly quote: QuoteSummary | undefined;
+  readonly warnings: readonly string[];
+  /** For sign/spend tools, the executable intent the kernel will re-validate. */
+  readonly intent: TradeIntent | undefined;
+  readonly data: unknown | undefined;
+}
+
+export interface ToolOutcome {
+  readonly isError: boolean;
+  readonly text: string; // LLM- and human-facing
+  readonly data: unknown | undefined; // structured payload
+}
+
+export interface ExecPolicy {
+  readonly timeoutMs: number;
+  readonly retries: number; // spend tools = 0
+  readonly idempotent: boolean; // spend tools = false
+}
+
+export interface ToolExecOptions {
+  readonly idempotencyKey: string;
+  readonly confirmedByUser?: boolean;
+}
+
+export interface IntentToolDefinition<Cfg = unknown> {
+  readonly name: string; // [action]_[protocol], e.g. swap_jupiter
+  readonly category: ToolCategory;
+  readonly description: string;
+  readonly capabilities: readonly ToolCapability[];
+  readonly execPolicy: ExecPolicy;
+  readonly configSchema: z.ZodType<Cfg>;
+
+  /** REAL quote/route/impact; never signs. Safe to call to build a quote card. */
+  simulate(ctx: ToolContext, cfg: Cfg): Promise<Preview>;
+
+  /** Non-throwing executor. sign/spend tools MUST route through ctx.gateway.execute(). */
+  execute(
+    ctx: ToolContext,
+    cfg: Cfg,
+    opts: ToolExecOptions,
+  ): Promise<ToolOutcome>;
+}
+
+export function hasToolCapability(
+  tool: Pick<IntentToolDefinition, "capabilities">,
+  cap: ToolCapability,
+): boolean {
+  return tool.capabilities.includes(cap);
+}
+
+/** A tool moves value iff it declares `sign` or `spend`. */
+export function movesValue(caps: readonly ToolCapability[]): boolean {
+  return caps.includes("sign") || caps.includes("spend");
 }

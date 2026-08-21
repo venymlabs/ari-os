@@ -7,43 +7,44 @@ import { SessionStore } from "../storage/session-store.js";
 import { DurableRunStore } from "../storage/run-store.js";
 import { checkDatabases } from "../storage/maintenance.js";
 import {
+  perpsPositionReader,
   registerBuiltInTools,
   type BuiltInDependencies,
+  type VenueMounts,
 } from "../tools/index.js";
 import { RegistryDispatcher } from "./adapters.js";
-import { RpcSimulator } from "../execution/rpc-simulator.js";
+import {
+  CLUSTER_GENESIS_HASHES,
+  RpcSimulator,
+} from "../execution/rpc-simulator.js";
 import { NoxaIndexStore } from "../storage/noxa-index.js";
 import { createNoxaTokenRegistry } from "../noxa.js";
-import {
-  createPublicClient,
-  custom,
-  encodeFunctionData,
-  getAddress,
-  http,
-  type Address,
-} from "viem";
+import { createPublicClient, http, type Address } from "viem";
 import { robinhoodMainnet, robinhoodTestnet } from "../chain.js";
+import { Connection, PublicKey, TransactionInstruction } from "@solana/web3.js";
+import {
+  JupiterClient,
+  SelfRpcBroadcaster,
+  SolanaRpc,
+} from "../chains/solana/index.js";
 import {
   ExecutionStore,
   TradingOrchestrator,
   UnixSignerClient,
+  type Commitment,
+  type TradingPolicy,
   type TradingRpc,
 } from "../live-trading/index.js";
 import { registerTradingTools } from "../live-trading/tools.js";
-import {
-  approvalIntent,
-  buildApprovalTransaction,
-  createRobinhoodTradingClient,
-  quoteRoutesAtBlock,
-  buildRoutedSwapIntent,
-  buildSwapTransaction,
-  ERC20_ABI,
-} from "../trading/index.js";
 import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import {
   buildSimulationRequest,
   createSimulationEvidence,
+  type PreparedTransaction,
+  type SimulationEvidence,
+  type SimulationRequest,
 } from "../execution/simulation.js";
 import {
   ApprovalEngine,
@@ -56,6 +57,84 @@ import {
   ReservationLedger,
   type ProductionRiskInput,
 } from "../execution/control/index.js";
+import { isPublicKey, signatureOf } from "../signer/transaction.js";
+import { systemClock } from "../kernel/clock.js";
+import { defaultPolicy } from "../kernel/defaults.js";
+import { KernelStore } from "../kernel/store.js";
+import { TradeGatewayImpl } from "../kernel/trade-gateway.js";
+import { USDC_DECIMALS } from "../kernel/money.js";
+import type {
+  LandMode,
+  PolicyConfig,
+  ToolContext,
+  WalletProvider,
+} from "../kernel/contracts.js";
+import { defaultPerpsPolicy, DriftVenue } from "../perps/index.js";
+import type { PerpsPolicy } from "../perps/index.js";
+import {
+  buildUnsignedTx,
+  MeteoraDataApi,
+  MeteoraDlmmVenue,
+  PumpFunClient,
+  RealDlmmSdk,
+  RpcChainReader,
+} from "../pools/index.js";
+import { DRIFT_SETTLEMENT_MINT } from "../perps/drift/convert.js";
+
+/**
+ * Cluster identity for a configured network.
+ *
+ * `src/config/` is the last module still speaking EVM (numeric chain ids,
+ * checksummed addresses); until it is ported, `NETWORK` is the only cluster
+ * signal the composition root has. `testnet` maps to `devnet` because that is
+ * the cluster operators actually rehearse on — Solana's `testnet` is a
+ * validator-release cluster, not a staging network.
+ */
+const CLUSTER_FOR_NETWORK = {
+  mainnet: "mainnet-beta",
+  testnet: "devnet",
+} as const;
+
+/** How long a quote may be acted on. Matches the documented CLI window. */
+const QUOTE_TTL_MS = 30_000;
+
+/**
+ * Baseline tip on quoted transactions. Not a safety control: the signer's own
+ * policy caps compute-unit price and the resulting priority fee, and refuses
+ * anything above it inside its own process.
+ */
+const QUOTE_PRIORITY_FEE_LAMPORTS = 200_000;
+
+/**
+ * Lamports that must remain after the transaction fee. Solana charges rent for
+ * new token accounts on top of the fee, so a wallet trading its last lamports
+ * cannot settle; this is the same headroom the kernel gateway keeps.
+ */
+const NATIVE_FEE_RESERVE_LAMPORTS = 3_000_000n;
+
+/**
+ * How far behind the tip a quote's context slot may be. A recent blockhash
+ * lives ~150 slots, so a quote older than that describes a transaction that can
+ * no longer land. `TRADING_FINALITY_BLOCKS` has no Solana meaning and is not
+ * used here — confirmation depth is a commitment level, not a count.
+ */
+const MAX_QUOTE_SLOT_LAG = 150n;
+
+const SPL_TOKEN_PROGRAM_ID = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+/** SPL Token `Revoke` — a one-byte instruction that can only reduce a delegate. */
+const SPL_REVOKE_DISCRIMINATOR = "05";
+const COMPUTE_BUDGET_PROGRAM_ID = "ComputeBudget111111111111111111111111111111";
+
+/**
+ * Solana has no router. The evaluator's single-valued `router` slot has no
+ * analogue, so it is pinned on both sides and the check that actually matters —
+ * every program the transaction invokes must be in the operator's signer-policy
+ * allowlist — is evaluated explicitly and merged into the same decision. The
+ * signer re-checks it independently inside its own process; this is defence in
+ * depth, not the authority.
+ */
+const ROUTER_UNUSED = "solana:no-router";
+
 export type DependencyHealth = {
   status: "available" | "unconfigured" | "unhealthy";
 };
@@ -87,7 +166,9 @@ export interface Application {
 export interface TradingComposition {
   trading: TradingOrchestrator;
   store: ExecutionStore;
-  client: ReturnType<typeof createPublicClient>;
+  /** The read side of the cluster this composition was built on. */
+  client: SolanaRpc;
+  cluster: string;
   signer?: UnixSignerClient;
   approvals?: ApprovalEngine;
   authorization?: AuthorizationIssuer;
@@ -101,46 +182,85 @@ export interface TradingComposition {
   verify(): Promise<void>;
   close(): void;
 }
+
+/** SPL Token `Revoke`: clears the delegate on one token account. */
+function revokeInstruction(tokenAccount: string, owner: string) {
+  return new TransactionInstruction({
+    programId: new PublicKey(SPL_TOKEN_PROGRAM_ID),
+    keys: [
+      {
+        pubkey: new PublicKey(tokenAccount),
+        isSigner: false,
+        isWritable: true,
+      },
+      { pubkey: new PublicKey(owner), isSigner: true, isWritable: false },
+    ],
+    data: Buffer.from([Number.parseInt(SPL_REVOKE_DISCRIMINATOR, 16)]),
+  });
+}
+
+/**
+ * The operator's program allowlist, read straight out of the signer policy.
+ *
+ * Deliberately a narrow read rather than a full `loadSignPolicy` (which is
+ * async, and whose validation belongs to the signer). An unreadable or
+ * non-Solana policy yields an empty list, which refuses every swap — the
+ * host-side check fails closed rather than degrading to "anything goes".
+ */
+function allowedPrograms(path: string | undefined): ReadonlySet<string> {
+  if (!path) return new Set();
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as {
+      programs?: { programId?: unknown }[];
+    };
+    return new Set(
+      (parsed.programs ?? [])
+        .map((p) => p?.programId)
+        .filter((p): p is string => isPublicKey(p)),
+    );
+  } catch {
+    return new Set();
+  }
+}
+
 export function createTradingComposition(
   config: AppConfig,
   fetchFn?: typeof fetch,
 ): TradingComposition | undefined {
   if (!config.trading || !config.rpc) return undefined;
-  const transport = fetchFn
-    ? custom({
-        request: async ({ method, params }) => {
-          const response = await fetchFn(config.rpc!.url, {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({
-              jsonrpc: "2.0",
-              id: 1,
-              method,
-              params: params ?? [],
-            }),
-          });
-          const payload = (await response.json()) as {
-            result?: unknown;
-            error?: { message?: string };
-          };
-          if (payload.error) throw Error(payload.error.message ?? "rpc error");
-          return payload.result;
-        },
-      })
-    : http(config.rpc.url);
-  const client = createPublicClient({
-    chain: robinhoodMainnet,
-    transport,
-  });
   const t = config.trading,
+    cluster: string = CLUSTER_FOR_NETWORK[config.network],
     store = new ExecutionStore(config.paths.executions);
-  const policy = {
+  const connection = new Connection(config.rpc.url, {
+    commitment: "confirmed",
+    ...(fetchFn ? { fetch: fetchFn } : {}),
+  });
+  const solana = new SolanaRpc(connection),
+    jupiter = new JupiterClient(),
+    broadcaster = new SelfRpcBroadcaster(solana);
+  const rpcCall = async (method: string, params: unknown[]) => {
+    const response = await (fetchFn ?? fetch)(config.rpc!.url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+    });
+    const payload = (await response.json()) as {
+      result?: unknown;
+      error?: { message?: string };
+    };
+    if (payload.error) throw Error(payload.error.message ?? "rpc error");
+    return payload.result;
+  };
+  const policy: TradingPolicy = {
     version: 1,
     maxAmountIn: t.maxAmountIn,
     maxSlippageBps: t.maxSlippageBps,
     approvalRequired: true,
-    finalityBlocks: t.finalityBlocks,
-    allowedTokens: t.allowedTokens,
+    // Solana has no confirmation depth to count. `finalized` is rooted state and
+    // is the only setting that cannot be rolled back, so it is the default until
+    // an operator can express the weaker choice in configuration.
+    finalityCommitment: "finalized" as Commitment,
+    allowedMints: t.allowedTokens,
   };
   const policyHash = createHash("sha256")
     .update(
@@ -151,171 +271,111 @@ export function createTradingComposition(
     .digest("hex");
   const simulator = new RpcSimulator({
     url: config.rpc.url,
-    chainId: config.rpc.chainId,
+    cluster,
     ...(fetchFn ? { fetch: fetchFn } : {}),
-    requireTrace: true,
   });
+  /**
+   * Decode one built transaction into an exact simulation request and prove it
+   * executes. Everything downstream — approval, authorization, the signer's own
+   * re-check — is bound to the bytes pinned here.
+   */
+  const pin = async (
+    built: PreparedTransaction,
+  ): Promise<{
+    request: SimulationRequest;
+    evidence: SimulationEvidence;
+    slot: bigint;
+  }> => {
+    const request = buildSimulationRequest(built, policyHash),
+      result = await simulator.simulate(request);
+    if (!result.success)
+      throw Error(`simulation failed: ${result.err ?? "failed"}`);
+    return {
+      request,
+      evidence: createSimulationEvidence(request, result),
+      slot: result.slot,
+    };
+  };
   const rpc: TradingRpc = {
-    balance: async (owner, token) =>
-      token
-        ? await client.readContract({
-            address: token,
-            abi: [
-              {
-                type: "function",
-                name: "balanceOf",
-                stateMutability: "view",
-                inputs: [{ type: "address" }],
-                outputs: [{ type: "uint256" }],
-              },
-            ],
-            functionName: "balanceOf",
-            args: [owner],
-          })
-        : await client.getBalance({ address: owner }),
+    balance: async (owner, mint) =>
+      mint ? solana.readBalance(owner, mint) : solana.getSolLamports(owner),
     quote: async (x) => {
-      const blockNumber = await client.getBlockNumber(),
-        block = await client.getBlock({ blockNumber });
-      const routes = await quoteRoutesAtBlock(client as any, {
-        quoter: t.quoter,
-        paths: [100, 500, 3000, 10000].map((fee) => ({
-          tokens: [x.tokenIn, x.tokenOut],
-          fees: [fee],
-        })),
-        amountIn: x.amountIn,
-        blockNumber,
+      // The orchestrator has already clamped slippage to policy; clamping again
+      // here means a caller that reaches this port directly cannot widen it.
+      const slippageBps = Math.min(
+        Number((x as { slippageBps?: number }).slippageBps ?? t.maxSlippageBps),
+        t.maxSlippageBps,
+      );
+      const quoted = await jupiter.quote({
+        inputMint: x.inputMint,
+        outputMint: x.outputMint,
+        amount: x.amountIn,
+        slippageBps,
       });
-      const intent = buildRoutedSwapIntent({
-        chainId: config.rpc!.chainId,
-        owner: t.account,
-        router: t.router,
-        recipient: t.account,
-        path: routes.best.path,
-        amountIn: x.amountIn,
-        quotedAmountOut: routes.best.amountOut,
-        now: BigInt(Math.floor(Date.now() / 1000)),
-        slippageBps: t.maxSlippageBps,
+      const built = await jupiter.buildSwap({
+        quote: quoted,
+        userPublicKey: t.account,
+        priorityFeeLamports: QUOTE_PRIORITY_FEE_LAMPORTS,
       });
-      const nonce = await client.getTransactionCount({
-          address: t.account,
-          blockTag: "pending",
-        }),
-        probe = buildSwapTransaction(intent, { nonce, gas: 1n, gasPrice: 1n });
-      const [gas, fees] = await Promise.all([
-        client.estimateGas({
-          account: t.account,
-          to: t.router,
-          data: probe.transaction.data,
-          value: probe.transaction.value,
-        }),
-        client.estimateFeesPerGas(),
-      ]);
-      const built = buildSwapTransaction(intent, {
-        nonce,
-        gas,
-        ...(fees.gasPrice !== undefined
-          ? { gasPrice: fees.gasPrice }
-          : {
-              maxFeePerGas: fees.maxFeePerGas!,
-              maxPriorityFeePerGas: fees.maxPriorityFeePerGas!,
-            }),
+      const { request, evidence, slot } = await pin({
+        cluster,
+        transaction: built.swapTransactionB64,
+        lastValidBlockHeight: built.lastValidBlockHeight,
       });
-      const request = buildSimulationRequest(
-          { ...built.transaction, from: t.account },
-          policyHash,
-        ),
-        result = await simulator.simulate(request);
-      if (!result.success)
-        throw Error(`simulation failed: ${result.revertReason ?? "reverted"}`);
-      const evidence = createSimulationEvidence(request, result);
       return {
-        amountOut: routes.best.amountOut,
-        blockNumber,
-        blockHash: block.hash,
-        expiresAt: Date.now() + 30_000,
-        route: routes.best.path,
+        amountOut: quoted.outAmount,
+        slot:
+          quoted.contextSlot === undefined ? slot : BigInt(quoted.contextSlot),
+        lastValidBlockHeight: built.lastValidBlockHeight,
+        expiresAt: Date.now() + QUOTE_TTL_MS,
+        route: quoted.routeLabel,
         request,
         evidence,
       };
     },
-    revokeQuote: async ({ token, spender }) => {
-      const blockNumber = await client.getBlockNumber(),
-        block = await client.getBlock({ blockNumber });
-      const intent = approvalIntent({
-        chainId: config.rpc!.chainId,
-        owner: t.account,
-        token,
-        spender,
-        amount: 0n,
+    revokeQuote: async ({ tokenAccount, owner }) => {
+      const latest = await connection.getLatestBlockhash("confirmed");
+      const built = buildUnsignedTx({
+        payer: new PublicKey(owner),
+        instructions: [revokeInstruction(tokenAccount, owner)],
+        recentBlockhash: latest.blockhash,
+        priorityFeeLamports: QUOTE_PRIORITY_FEE_LAMPORTS,
       });
-      const nonce = await client.getTransactionCount({
-          address: t.account,
-          blockTag: "pending",
-        }),
-        probe = buildApprovalTransaction(intent, {
-          nonce,
-          gas: 1n,
-          gasPrice: 1n,
-        });
-      const [gas, fees] = await Promise.all([
-        client.estimateGas({
-          account: t.account,
-          to: token,
-          data: probe.transaction.data,
-          value: 0n,
-        }),
-        client.estimateFeesPerGas(),
-      ]);
-      const built = buildApprovalTransaction(intent, {
-        nonce,
-        gas,
-        ...(fees.gasPrice !== undefined
-          ? { gasPrice: fees.gasPrice }
-          : {
-              maxFeePerGas: fees.maxFeePerGas!,
-              maxPriorityFeePerGas: fees.maxPriorityFeePerGas!,
-            }),
+      const { request, evidence, slot } = await pin({
+        cluster,
+        transaction: built.unsignedTxBase64,
+        lastValidBlockHeight: latest.lastValidBlockHeight,
       });
-      const request = buildSimulationRequest(
-          { ...built.transaction, from: t.account },
-          policyHash,
-        ),
-        result = await simulator.simulate(request);
-      if (!result.success)
-        throw Error(`simulation failed: ${result.revertReason ?? "reverted"}`);
-      const evidence = createSimulationEvidence(request, result);
       return {
         amountOut: 0n,
-        blockNumber,
-        blockHash: block.hash,
-        expiresAt: Date.now() + 30_000,
+        slot,
+        lastValidBlockHeight: latest.lastValidBlockHeight,
+        expiresAt: Date.now() + QUOTE_TTL_MS,
         request,
         evidence,
       };
     },
-    simulate: async (request) =>
-      createSimulationEvidence(
-        request as any,
-        await simulator.simulate(request as any),
-      ),
-    broadcast: (raw) =>
-      client.sendRawTransaction({ serializedTransaction: raw }),
-    receipt: async (h) => {
-      const r = await client
-        .getTransactionReceipt({ hash: h })
-        .catch(() => null);
-      if (!r) return null;
-      const n = await client.getBlockNumber();
+    simulate: async (request) => {
+      const exact = request as SimulationRequest;
+      return createSimulationEvidence(exact, await simulator.simulate(exact));
+    },
+    broadcast: async (wire) =>
+      (
+        await broadcaster.broadcast(
+          { wireBase64: wire, signature: signatureOf(wire) },
+          undefined,
+        )
+      ).signature,
+    status: async (signature) => {
+      const s = (await connection.getSignatureStatuses([signature])).value[0];
+      if (!s) return null;
       return {
-        blockNumber: r.blockNumber,
-        blockHash: r.blockHash,
-        status: r.status,
-        confirmations: Number(n - r.blockNumber + 1n),
+        slot: BigInt(s.slot),
+        confirmationStatus: (s.confirmationStatus ?? "processed") as Commitment,
+        err: s.err,
       };
     },
-    blockHash: async (n) =>
-      (await client.getBlock({ blockNumber: n }).catch(() => null))?.hash ??
-      null,
+    blockHeight: () => connection.getBlockHeight("confirmed"),
   };
   let signer: UnixSignerClient | undefined;
   if (t.liveEnabled && t.signerSocketPath) {
@@ -394,20 +454,25 @@ export function createTradingComposition(
     reservations = new ReservationLedger(config.paths.reservations);
     const riskHashes = new Set<string>(),
       simulationHashes = new Set<string>();
-    const perToken = Object.fromEntries(
-      t.allowedTokens.map((token) => [token, t.maxAmountIn]),
+    const perMint = Object.fromEntries(
+      t.allowedTokens.map((mint) => [mint, t.maxAmountIn]),
     );
+    const programs = allowedPrograms(t.signerPolicyPath);
     riskEvaluator = new ProductionRiskEvaluator({
+      // Still the config's numeric network id: `src/config/` is the last EVM
+      // surface. What binds a transaction to a cluster on Solana is checked
+      // explicitly below, again by the authorization issuer's `blockhash`
+      // check, and a third time by the signer's own policy `cluster` field.
       chains: [BigInt(config.rpc.chainId)],
       accounts: [t.account],
-      routers: [t.router],
+      routers: [ROUTER_UNUSED],
       tokens: t.allowedTokens,
-      maxPerTrade: perToken,
-      maxReservedPerToken: perToken,
+      maxPerTrade: perMint,
+      maxReservedPerToken: perMint,
       maxSlippageBps: BigInt(t.maxSlippageBps),
       maxQuoteAge: 30n,
-      maxQuoteBlocks: BigInt(t.finalityBlocks),
-      nativeGasReserve: 1n,
+      maxQuoteBlocks: MAX_QUOTE_SLOT_LAG,
+      nativeGasReserve: NATIVE_FEE_RESERVE_LAMPORTS,
     });
     const canonicalRisk = (value: unknown): string =>
       canonicalSerialize(
@@ -417,10 +482,23 @@ export function createTradingComposition(
           ),
         ),
       );
+    const hashRisk = (
+      input: unknown,
+      decision: { allowed: boolean; reasons: string[] },
+    ) => {
+      const hash = createHash("sha256")
+        .update("production-risk-v2\0")
+        .update(canonicalRisk({ input, decision }))
+        .digest("hex");
+      if (decision.allowed) riskHashes.add(hash);
+      return { hash, ...decision };
+    };
+    /** Every program the transaction invokes must be pinned by the operator. */
+    const programsAllowed = (r: SimulationRequest) =>
+      r.programIds.length > 0 && r.programIds.every((p) => programs.has(p));
     risk = {
       assess: async (raw) => {
         try {
-          let input: ProductionRiskInput;
           const wrapped = raw as any;
           if (
             wrapped?.quote?.side === "revoke" &&
@@ -429,113 +507,108 @@ export function createTradingComposition(
           ) {
             // A revoke carries zero capital exposure, so the swap risk
             // evaluator does not apply. It is still assessed: the pinned
-            // transaction must be exactly approve(router, 0) on the quoted
-            // token, at a canonical un-reorged block, before it can earn a
-            // risk hash the authorization issuer will accept.
+            // transaction must be exactly SPL Token `Revoke` on the quoted
+            // token account, owned by the trading account, on a blockhash that
+            // can still land, before it earns a risk hash the authorization
+            // issuer will accept.
             const q = wrapped.quote,
-              tx = wrapped.request.transaction,
-              e = wrapped.evidence,
+              r = wrapped.request as SimulationRequest,
               reasons: string[] = [];
-            const expectedData = encodeFunctionData({
-              abi: ERC20_ABI,
-              functionName: "approve",
-              args: [getAddress(t.router), 0n],
-            });
-            if (BigInt(tx.chainId) !== BigInt(config.rpc!.chainId))
-              reasons.push("chain_not_allowed");
-            if (getAddress(tx.from) !== getAddress(t.account))
-              reasons.push("account_not_allowed");
-            if (getAddress(tx.to) !== getAddress(q.tokenIn))
+            const spend = r.instructions.filter(
+              (i) => i.programId !== COMPUTE_BUDGET_PROGRAM_ID,
+            );
+            if (r.cluster !== cluster) reasons.push("cluster_not_allowed");
+            if (r.feePayer !== t.account) reasons.push("account_not_allowed");
+            if (!programsAllowed(r)) reasons.push("program_not_allowed");
+            if (spend.length !== 1)
+              reasons.push("revoke_instruction_count_invalid");
+            const ix = spend[0];
+            if (ix && ix.programId !== SPL_TOKEN_PROGRAM_ID)
+              reasons.push("revoke_program_mismatch");
+            if (ix && ix.data !== SPL_REVOKE_DISCRIMINATOR)
+              reasons.push("revoke_instruction_mismatch");
+            if (ix && ix.accounts[0] !== q.inputMint)
               reasons.push("revoke_target_mismatch");
-            if (BigInt(tx.value) !== 0n) reasons.push("revoke_value_nonzero");
-            if (String(tx.data).toLowerCase() !== expectedData.toLowerCase())
-              reasons.push("revoke_calldata_mismatch");
-            if (q.expiresAt <= Date.now()) reasons.push("quote_stale");
-            const canonicalBlockHash = await rpc.blockHash(q.blockNumber);
+            if (ix && ix.accounts[1] !== t.account)
+              reasons.push("revoke_owner_mismatch");
             if (
-              !canonicalBlockHash ||
-              String(q.blockHash ?? e.blockHash).toLowerCase() !==
-                canonicalBlockHash.toLowerCase()
-            )
-              reasons.push("quote_block_reorged");
-            const decision = { allowed: !reasons.length, reasons };
-            const hash = createHash("sha256")
-              .update("production-risk-v2\0")
-              .update(
-                canonicalRisk({
-                  input: {
-                    kind: "revoke",
-                    chain: BigInt(config.rpc!.chainId),
-                    account: t.account,
-                    token: q.tokenIn,
-                    spender: t.router,
-                    transactionHash: wrapped.request.transactionHash,
-                  },
-                  decision,
-                }),
+              (wrapped.evidence.assetDeltas ?? []).some(
+                (d: { asset: string }) => d.asset !== "native",
               )
-              .digest("hex");
-            if (decision.allowed) riskHashes.add(hash);
-            return { hash, ...decision };
+            )
+              reasons.push("revoke_moves_assets");
+            if (q.expiresAt <= Date.now()) reasons.push("quote_stale");
+            if ((await rpc.blockHeight()) > q.lastValidBlockHeight)
+              reasons.push("quote_blockhash_expired");
+            return hashRisk(
+              {
+                kind: "revoke",
+                cluster,
+                account: t.account,
+                tokenAccount: q.inputMint,
+                messageHash: r.messageHash,
+              },
+              { allowed: !reasons.length, reasons },
+            );
           }
           if (wrapped?.quote && wrapped?.request && wrapped?.evidence) {
             const q = wrapped.quote,
-              tx = wrapped.request.transaction,
-              e = wrapped.evidence,
+              r = wrapped.request as SimulationRequest,
+              e = wrapped.evidence as SimulationEvidence,
               now = BigInt(Math.floor(Date.now() / 1000));
-            const [
-              currentBlock,
-              canonicalBlockHash,
-              tokenBalance,
-              nativeBalance,
-            ] = await Promise.all([
-              client.getBlockNumber(),
-              rpc.blockHash(q.blockNumber),
-              rpc.balance(t.account, q.tokenIn),
-              rpc.balance(t.account),
-            ]);
-            if (!canonicalBlockHash) throw Error("canonical block unavailable");
-            const fee = tx.gasPrice ?? tx.maxFeePerGas;
-            if (fee === undefined) throw Error("gas price unavailable");
-            input = {
+            const [currentSlot, blockHeight, mintBalance, nativeBalance] =
+              await Promise.all([
+                connection.getSlot("confirmed"),
+                rpc.blockHeight(),
+                rpc.balance(t.account, q.inputMint),
+                rpc.balance(t.account),
+              ]);
+            // Solana has no canonical-block-hash comparison. The equivalent
+            // liveness fact is whether the quote's recent blockhash can still
+            // land, so the two hashes agree exactly while it can and diverge
+            // the moment it cannot — leaving `quote_noncanonical` meaning
+            // precisely "this transaction is already dead".
+            const alive = blockHeight <= q.lastValidBlockHeight;
+            const input: ProductionRiskInput = {
               now,
               chain: BigInt(config.rpc!.chainId),
-              account: t.account,
-              router: t.router,
-              tokenIn: q.tokenIn,
-              tokenOut: q.tokenOut,
+              account: r.feePayer,
+              router: ROUTER_UNUSED,
+              tokenIn: q.inputMint,
+              tokenOut: q.outputMint,
               amountIn: q.amountIn,
               slippageBps: BigInt(q.slippageBps),
-              quoteAt: BigInt(Math.floor((q.expiresAt - 30_000) / 1000)),
-              quoteBlock: q.blockNumber,
-              currentBlock,
-              quoteBlockHash: q.blockHash ?? e.blockHash,
-              canonicalBlockHash,
-              tokenBalance,
+              quoteAt: BigInt(Math.floor((q.expiresAt - QUOTE_TTL_MS) / 1000)),
+              quoteBlock: q.slot,
+              currentBlock: BigInt(currentSlot),
+              quoteBlockHash: r.recentBlockhash,
+              canonicalBlockHash: alive ? r.recentBlockhash : "expired",
+              tokenBalance: mintBalance,
               nativeBalance,
-              estimatedGasCost: BigInt(tx.gas) * BigInt(fee),
+              estimatedGasCost: e.feeLamports,
             };
-          } else input = raw as ProductionRiskInput;
-          const decision = riskEvaluator!.evaluate(
+            const verdict = riskEvaluator!.evaluate(
+              input,
+              reservations!.entries(input.now),
+            );
+            const reasons = [...verdict.reasons];
+            if (r.cluster !== cluster) reasons.push("cluster_not_allowed");
+            if (!programsAllowed(r)) reasons.push("program_not_allowed");
+            return hashRisk(input, {
+              allowed: reasons.length === 0,
+              reasons,
+            });
+          }
+          const input = raw as ProductionRiskInput;
+          return hashRisk(
             input,
-            reservations!.entries(input.now),
+            riskEvaluator!.evaluate(input, reservations!.entries(input.now)),
           );
-          const hash = createHash("sha256")
-            .update("production-risk-v2\0")
-            .update(canonicalRisk({ input, decision }))
-            .digest("hex");
-          if (decision.allowed) riskHashes.add(hash);
-          return { hash, ...decision };
         } catch {
-          const decision = {
+          return hashRisk(raw, {
             allowed: false,
             reasons: ["risk_inputs_unavailable"],
-          };
-          const hash = createHash("sha256")
-            .update("production-risk-v2\0")
-            .update(canonicalRisk({ input: raw, decision }))
-            .digest("hex");
-          return { hash, ...decision };
+          });
         }
       },
     };
@@ -558,17 +631,17 @@ export function createTradingComposition(
           reservations!.has(id) || revokeReservations.has(id),
         approval: async (id) => approvals!.get(id)?.status === "consumed",
         simulation: async (hash) => simulationHashes.has(hash),
-        nonce: async (_chain, account) =>
-          client.getTransactionCount({
-            address: account as Address,
-            blockTag: "pending",
-          }),
+        // Solana's replay fence. The issuer refuses when the cluster has
+        // already passed the transaction's `lastValidBlockHeight`, so no
+        // authorization is ever minted for a transaction that cannot land.
+        blockhash: async (c) =>
+          c === cluster ? await rpc.blockHeight() : false,
       },
     });
     const originalSimulate = rpc.simulate;
     rpc.simulate = async (request) => {
       const evidence = await originalSimulate(request);
-      simulationHashes.add((evidence as any).hash);
+      simulationHashes.add((evidence as SimulationEvidence).hash);
       return evidence;
     };
   }
@@ -579,31 +652,30 @@ export function createTradingComposition(
           if (!q) throw Error("reservation_quote_missing");
           if (q.side === "revoke") {
             const revokeId = createHash("sha256")
-              .update(
-                `revoke-reservation-v1\0${x.quoteHash}\0${x.transactionHash}`,
-              )
+              .update(`revoke-reservation-v1\0${x.quoteHash}\0${x.messageHash}`)
               .digest("hex");
             revokeReservations.add(revokeId);
             return revokeId;
           }
           const id = createHash("sha256")
-            .update(`reservation-v1\0${x.quoteHash}\0${x.transactionHash}`)
+            .update(`reservation-v1\0${x.quoteHash}\0${x.messageHash}`)
             .digest("hex");
           if (
             !reservations!.reserveWithin(
               {
                 id,
                 at: BigInt(Math.floor(Date.now() / 1000)),
-                asset: q.tokenIn,
+                asset: q.inputMint,
                 strategy: "live",
                 amount: q.amountIn,
               },
               {
-                // Native token units: this cap is evaluated and inserted under one
-                // BEGIN IMMEDIATE transaction. Aggregate exposure is disabled until
-                // the adapter has explicit normalized quote valuation evidence.
+                // Input-leg base units: this cap is evaluated and inserted under
+                // one BEGIN IMMEDIATE transaction. Aggregate exposure is
+                // disabled until the adapter has explicit normalized quote
+                // valuation evidence.
                 perAsset:
-                  riskEvaluator!.limits.maxReservedPerToken[q.tokenIn] ?? 0n,
+                  riskEvaluator!.limits.maxReservedPerToken[q.inputMint] ?? 0n,
               },
             )
           )
@@ -619,9 +691,8 @@ export function createTradingComposition(
       }
     : undefined;
   const trading = new TradingOrchestrator({
-    chainId: config.rpc.chainId,
+    cluster,
     account: t.account,
-    router: t.router,
     policy: { ...policy, hash: policyHash },
     rpc,
     store,
@@ -636,7 +707,8 @@ export function createTradingComposition(
   return {
     trading,
     store,
-    client,
+    client: solana,
+    cluster,
     ...(signer ? { signer } : {}),
     ...(approvals ? { approvals } : {}),
     ...(authorization ? { authorization } : {}),
@@ -644,10 +716,12 @@ export function createTradingComposition(
     ...(riskEvaluator ? { riskEvaluator } : {}),
     ...(risk ? { risk } : {}),
     async verify() {
-      await createRobinhoodTradingClient({
-        client: client as any,
-        contracts: [t.router, t.quoter, t.factory],
-      });
+      // The genesis hash is the only self-describing cluster identity Solana
+      // has; it replaces the EVM chain-id and contract-bytecode probes.
+      const expectedGenesis = CLUSTER_GENESIS_HASHES[cluster];
+      const genesis = await rpcCall("getGenesisHash", []);
+      if (expectedGenesis && genesis !== expectedGenesis)
+        throw Error("rpc_cluster_mismatch");
       if (signer) {
         let status;
         try {
@@ -656,13 +730,11 @@ export function createTradingComposition(
           throw Error("signer_unavailable");
         }
         const expectedPolicyHash = `0x${createHash("sha256").update(readFileSync(t.signerPolicyPath!, "utf8")).digest("hex")}`;
-        if (status.account.toLowerCase() !== t.account.toLowerCase())
+        // base58 is case-sensitive: two keys differing only in case are two
+        // different wallets, so this comparison is exact.
+        if (status.account !== t.account)
           throw Error("signer_account_mismatch");
-        if (
-          status.chainIds.length !== 1 ||
-          status.chainIds[0] !== config.rpc!.chainId
-        )
-          throw Error("signer_chain_ids_mismatch");
+        if (status.cluster !== cluster) throw Error("signer_cluster_mismatch");
         if (
           status.policyHash.toLowerCase() !== expectedPolicyHash.toLowerCase()
         )
@@ -680,12 +752,142 @@ export function createTradingComposition(
     },
   };
 }
+
+/**
+ * Everything the venue-backed toolsets need beyond a `ToolContext`, plus the
+ * kernel store and position reader the money path is built on.
+ *
+ * Mounting is gated on a {@link WalletProvider} because a venue tool that
+ * cannot reach a Solana wallet has nothing to build an intent for. Custody in
+ * production is the isolated signer daemon, whose `sign` takes an authorization
+ * envelope rather than raw bytes, so no `WalletProvider` is derived from it
+ * here: until that bridge exists the composition supplies none, the venue tools
+ * are not registered, and the tools simply do not exist. That is the correct
+ * default — an unmounted venue must not be reachable.
+ */
+interface VenueComposition {
+  mounts: VenueMounts;
+  store: KernelStore;
+}
+
+function createVenueComposition(
+  config: AppConfig,
+  wallet: WalletProvider,
+): VenueComposition | undefined {
+  if (!config.rpc || !isPublicKey(wallet.pubkey)) return undefined;
+  const cluster = CLUSTER_FOR_NETWORK[config.network];
+  const connection = new Connection(config.rpc.url, "confirmed");
+  const solana = new SolanaRpc(connection),
+    jupiter = new JupiterClient(),
+    chain = new RpcChainReader(connection),
+    kernelStore = new KernelStore(join(config.dataDir, "kernel.sqlite"));
+  const broadcaster = new SelfRpcBroadcaster(solana);
+  const broadcasters: Record<LandMode, SelfRpcBroadcaster> = {
+    "jupiter-ultra": broadcaster,
+    "self-rpc": broadcaster,
+  };
+  // The mint allowlist is only adopted when every configured entry is a real
+  // base58 mint. `src/config/` still validates EVM addresses, and quietly
+  // turning those into a Solana allowlist would refuse everything for a reason
+  // no operator could read. Spend caps and the signer policy still bind.
+  const configuredMints = config.trading?.allowedTokens ?? [];
+  const mintAllowlist =
+    configuredMints.length > 0 && configuredMints.every(isPublicKey)
+      ? [...configuredMints]
+      : null;
+  const kernelPolicy: PolicyConfig = {
+    ...defaultPolicy(),
+    executionEnabled: config.trading?.liveEnabled ?? false,
+    ...(config.trading
+      ? { maxSlippageBps: config.trading.maxSlippageBps }
+      : {}),
+    mintAllowlist,
+  };
+  const perps = {
+    venue: new DriftVenue({
+      connection,
+      publicKey: new PublicKey(wallet.pubkey),
+      owner: wallet.pubkey,
+      blockhash: {
+        latestBlockhash: () => connection.getLatestBlockhash("confirmed"),
+      },
+      env:
+        cluster === "mainnet-beta"
+          ? ("mainnet-beta" as const)
+          : ("devnet" as const),
+    }),
+    // `perpsEnabled` is false in the default policy, so perps tools read and
+    // propose but every opening guard refuses until an operator arms them.
+    policy: (): PerpsPolicy => defaultPerpsPolicy(),
+    killSwitch: () => false,
+    executionEnabled: () => kernelPolicy.executionEnabled,
+    collateral: () => ({
+      mint: DRIFT_SETTLEMENT_MINT,
+      decimals: USDC_DECIMALS,
+    }),
+  };
+  const positions = perpsPositionReader({ perps });
+  const gateway = new TradeGatewayImpl({
+    store: kernelStore,
+    wallet,
+    policy: () => kernelPolicy,
+    mints: solana,
+    balances: solana,
+    simulator: solana,
+    broadcasters,
+    confirmer: solana,
+    clock: systemClock,
+    // Without this the gateway refuses every perp intent with
+    // SETTLE_UNVERIFIABLE — a perp fill cannot be read off a token balance.
+    ...(positions ? { positions } : {}),
+  });
+  const toolContext: ToolContext = {
+    ownerWallet: wallet.pubkey,
+    rpcUrl: config.rpc.url,
+    services: { solana, jupiter },
+    gateway,
+    log: {
+      info: () => {},
+      warn: () => {},
+      error: () => {},
+      debug: () => {},
+    },
+    signal: undefined,
+  };
+  return {
+    store: kernelStore,
+    mounts: {
+      // `confirmedByUser` is deliberately unwired: this process has no
+      // per-invocation human-confirmation channel, and the default of `false`
+      // means untrusted-provenance mints are refused rather than waved through.
+      runtime: { context: () => toolContext },
+      perps,
+      pools: {
+        venue: new MeteoraDlmmVenue({
+          sdk: new RealDlmmSdk(connection),
+          api: new MeteoraDataApi(),
+          chain,
+        }),
+        curve: new PumpFunClient(chain),
+        chain,
+        // No signals engine is wired, so `guardRugHeat` refuses on a missing
+        // reading: that means no curve buys, not unchecked ones.
+      },
+    },
+  };
+}
+
 export function createApplication(
   config: AppConfig,
   overrides: {
     modelProvider?: ModelProvider;
     tools?: BuiltInDependencies;
     rpcFetch?: typeof fetch;
+    /**
+     * Custody for the venue-backed toolsets. Omitted (the default) the perps
+     * and liquidity tools are not registered at all.
+     */
+    wallet?: WalletProvider;
   } = {},
 ): Application {
   let state: "created" | "starting" | "ready" | "stopped" = "created",
@@ -699,10 +901,12 @@ export function createApplication(
   if (config.rpc) {
     const simulator = new RpcSimulator({
       url: config.rpc.url,
-      chainId: config.rpc.chainId,
+      cluster: CLUSTER_FOR_NETWORK[config.network],
       ...(overrides.rpcFetch ? { fetch: overrides.rpcFetch } : {}),
-      requireTrace: true,
     });
+    // The NOXA launchpad index is the last EVM-native read surface still
+    // shipped; it is retired with the rest of `src/noxa.ts` and `src/chain.ts`,
+    // not here, so that the tree stays buildable through the migration.
     const chain =
       config.network === "mainnet" ? robinhoodMainnet : robinhoodTestnet;
     const client = createPublicClient({
@@ -728,11 +932,15 @@ export function createApplication(
       simulation: { simulate: (input) => simulator.simulate(input) },
     };
   }
+  const venues = overrides.wallet
+    ? createVenueComposition(config, overrides.wallet)
+    : undefined;
   const registry = registerBuiltInTools(new ToolRegistry(), {
     ...composed,
     ...overrides.tools,
     market: { ...composed.market, ...overrides.tools?.market },
     noxa: { ...composed.noxa, ...overrides.tools?.noxa },
+    ...(venues ? { venues: venues.mounts } : {}),
   });
   const tc = createTradingComposition(config, overrides.rpcFetch);
   if (tc) registerTradingTools(registry, tc.trading);
@@ -740,9 +948,12 @@ export function createApplication(
     TRADING_CAPABILITIES.MARKET_DATA,
     TRADING_CAPABILITIES.RISK_ANALYSIS,
     TRADING_CAPABILITIES.ORDER_SIMULATE,
-    ...(tc
+    // Granting a capability only makes a registered tool dispatchable; the
+    // gateway, the guards and the signer still decide whether anything moves.
+    ...(tc || venues
       ? [TRADING_CAPABILITIES.ORDER_WRITE, TRADING_CAPABILITIES.PORTFOLIO_READ]
       : []),
+    ...(venues ? [TRADING_CAPABILITIES.POSITION_WRITE] : []),
   ];
   const provider = overrides.modelProvider ?? {
     id: "unconfigured",
@@ -813,6 +1024,7 @@ export function createApplication(
       if (state === "stopped") return;
       if (reconciliationTimer) clearInterval(reconciliationTimer);
       tc?.close();
+      venues?.store.close();
       noxaStore?.close();
       sessions?.close();
       runs.close();

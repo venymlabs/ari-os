@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createUserWorkflow } from "../src/cli/user-workflow.js";
 import { posixPermissions } from "./helpers.js";
+import { pubkey, TOKEN_PROGRAM } from "./signer-fixtures.js";
+const TOKEN_ACCOUNT = pubkey(10);
 const dirs: string[] = [];
 afterEach(() =>
   Promise.all(
@@ -28,7 +30,7 @@ describe("clone-to-trade workflow", () => {
       JSON.parse(await readFile(join(dir, "config.json"), "utf8")).mode,
     ).toBe("local");
   });
-  it("writes a default sign policy that can authorize allowance revokes", async () => {
+  it("writes a default sign policy that can authorize delegate revokes", async () => {
     const dir = await mkdtemp(join(tmpdir(), "raos-user-"));
     dirs.push(dir);
     const user = createUserWorkflow({ dataDir: dir });
@@ -36,9 +38,15 @@ describe("clone-to-trade workflow", () => {
     const policy = JSON.parse(
       await readFile(join(dir, "sign-policy.json"), "utf8"),
     );
-    expect(policy.dataPrefixes).toContain("0x095ea7b3");
+    // SPL Token `Revoke`, classified `none` because it cannot move value: it
+    // only ever reduces what a delegate may move.
+    expect(policy.programs).toContainEqual({
+      programId: TOKEN_PROGRAM,
+      discriminator: "05",
+      effect: "none",
+    });
   });
-  it("routes trade revoke to the orchestrator with normalized token and dry-run default", async () => {
+  it("routes trade revoke to the orchestrator with a checked token account and dry-run default", async () => {
     const dir = await mkdtemp(join(tmpdir(), "raos-user-"));
     dirs.push(dir);
     const calls: unknown[] = [];
@@ -54,17 +62,11 @@ describe("clone-to-trade workflow", () => {
     const out: any = await user({
       group: "trade",
       action: "revoke",
-      args: {
-        token: "0x00000000000000000000000000000000000000aa",
-        idempotencyKey: "k1",
-      },
+      args: { token: TOKEN_ACCOUNT, idempotencyKey: "k1" },
     });
     expect(out.state).toBe("dry-run");
     expect(calls).toEqual([
-      [
-        "0x00000000000000000000000000000000000000AA",
-        { idempotencyKey: "k1", actor: "cli", dryRun: true },
-      ],
+      [TOKEN_ACCOUNT, { idempotencyKey: "k1", actor: "cli", dryRun: true }],
     ]);
     await expect(
       user({

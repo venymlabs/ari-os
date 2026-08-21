@@ -14,6 +14,8 @@ import type {
   ConfirmStatus,
   MintInfo,
   MintInspector,
+  PerpPositionRef,
+  PositionReader,
   SignedTx,
   SimOutcome,
   Simulator,
@@ -35,14 +37,45 @@ export class MockChain {
   /** When set, MockBroadcaster.broadcast throws — models an RPC send failure. */
   broadcastError: string | null = null;
 
+  /** Signed venue positions, keyed by {@link positionKey}. Positive = long. */
+  readonly positions = new Map<string, bigint>();
+  /** Signed base-unit change a confirmed broadcast applies to `positionFillKey`. */
+  positionFill: { key: string; delta: bigint } | null = null;
+  /** When set, MockPositions.readPosition throws — models an unreadable venue. */
+  positionError: string | null = null;
+
   applyFill(): void {
-    if (!this.fill) return;
-    const f = this.fill;
-    this.balances.set(f.inMint, (this.balances.get(f.inMint) ?? 0n) - f.inAmt);
-    this.balances.set(
-      f.outMint,
-      (this.balances.get(f.outMint) ?? 0n) + f.outAmt,
-    );
+    if (this.fill) {
+      const f = this.fill;
+      this.balances.set(
+        f.inMint,
+        (this.balances.get(f.inMint) ?? 0n) - f.inAmt,
+      );
+      this.balances.set(
+        f.outMint,
+        (this.balances.get(f.outMint) ?? 0n) + f.outAmt,
+      );
+    }
+    if (this.positionFill) {
+      const p = this.positionFill;
+      this.positions.set(p.key, (this.positions.get(p.key) ?? 0n) + p.delta);
+    }
+  }
+}
+
+export function positionKey(ref: PerpPositionRef): string {
+  return `${ref.venue}:${ref.market}:${ref.subAccountId}`;
+}
+
+/** A venue position book the gateway's perp settle check can diff against. */
+export class MockPositions implements PositionReader {
+  #chain: MockChain;
+  constructor(chain: MockChain) {
+    this.#chain = chain;
+  }
+  async readPosition(ref: PerpPositionRef): Promise<bigint> {
+    if (this.#chain.positionError) throw new Error(this.#chain.positionError);
+    return this.#chain.positions.get(positionKey(ref)) ?? 0n;
   }
 }
 

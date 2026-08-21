@@ -7,8 +7,9 @@ import {
   ExecutionStore,
   TradingOrchestrator,
 } from "../src/live-trading/index.js";
+import { CLUSTER, pubkey } from "./signer-fixtures.js";
 const A = "0x0000000000000000000000000000000000000001",
-  B = "0x0000000000000000000000000000000000000002";
+  FEE_PAYER = pubkey(1);
 function files() {
   const d = mkdtempSync(join(tmpdir(), "gates-"));
   for (const n of ["token", "policy", "approval", "auth"])
@@ -58,15 +59,14 @@ describe("mandatory live gates", () => {
         approvalId: "missing",
       });
     const o = new TradingOrchestrator({
-      chainId: 1,
-      account: A,
-      router: B,
+      cluster: CLUSTER,
+      account: FEE_PAYER,
       policy: {
         version: 1,
         maxAmountIn: 1n,
         maxSlippageBps: 1,
         approvalRequired: true,
-        finalityBlocks: 1,
+        finalityCommitment: "finalized",
       },
       rpc: {} as any,
       store,

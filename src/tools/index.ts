@@ -1,6 +1,8 @@
 import { z } from "zod";
 import { ToolRegistry } from "../agent/tools/registry.js";
 import { TRADING_CAPABILITIES } from "../agent/types.js";
+import type { VenueMounts } from "./venues.js";
+import { registerVenueTools } from "./venues.js";
 const provenance = z.object({
   observedAt: z.number(),
   source: z.string(),
@@ -27,6 +29,13 @@ export interface BuiltInDependencies {
   };
   risk?: { analyze?: (input: unknown) => unknown };
   simulation?: { simulate?: (input: any) => Promise<unknown> };
+  /**
+   * Perps and liquidity venues. Omitted, those tools simply do not exist —
+   * which is the correct default: an unmounted venue must not be reachable.
+   * See `src/tools/venues.ts`, and note that mounting perps also requires
+   * handing `perpsPositionReader(...)` to the trade gateway.
+   */
+  venues?: VenueMounts;
 }
 const wrap = (source: string, data: unknown) => ({
   data,
@@ -162,5 +171,15 @@ export function registerBuiltInTools(
     "trade",
     TRADING_CAPABILITIES.ORDER_SIMULATE,
   );
+  if (d.venues) registerVenueTools(r, d.venues);
   return r;
 }
+
+export { registerIntentTool, registerIntentTools } from "./intent-bridge.js";
+export type { IntentToolRuntime } from "./intent-bridge.js";
+export {
+  perpsPositionReader,
+  registerVenueTools,
+  venueToolNames,
+} from "./venues.js";
+export type { VenueMounts } from "./venues.js";

@@ -23,7 +23,9 @@ export type GuardCode =
   | "DUPLICATE_INTENT" // idempotency key already used
   | "BROADCAST_FAILED" // could not submit the signed tx
   | "CONFIRM_TIMEOUT" // blockhash expired before confirmation
-  | "SETTLE_SHORTFALL"; // confirmed, but received less than the committed min-out
+  | "SETTLE_SHORTFALL" // confirmed, but the fill was below the committed minimum
+  | "SETTLE_UNVERIFIABLE" // no way to verify the fill for this intent kind — refuse before broadcast
+  | "SETTLE_UNVERIFIED"; // confirmed on-chain, but the fill check could not be read back
 
 export class GuardError extends Error {
   readonly code: GuardCode;

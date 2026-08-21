@@ -53,9 +53,11 @@
     "trading:reconcile": "node dist/bin/robinhood-agent-os.js trade reconcile",
     "dashboard:build": "node -e \"console.log('dashboard not included in phases 0-5')\""
   },
+  "overrides": {
+    "uuid": "^11.1.1"
+  },
   "dependencies": {
     "@fastify/cors": "^11.3.0",
-    "@solana/spl-token": "^0.4.15",
     "@solana/web3.js": "^1.98.4",
     "bs58": "^6.0.0",
     "fastify": "^5.10.0",
@@ -63,6 +65,18 @@
     "yaml": "^2.9.0",
     "zod": "^3.25.76",
     "zod-to-json-schema": "^3.25.2"
+  },
+  "peerDependencies": {
+    "@drift-labs/sdk": "^2.156.0",
+    "@meteora-ag/dlmm": "^1.9.0"
+  },
+  "peerDependenciesMeta": {
+    "@drift-labs/sdk": {
+      "optional": true
+    },
+    "@meteora-ag/dlmm": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
