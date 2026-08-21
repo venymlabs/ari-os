@@ -1,0 +1,288 @@
+ARI OS
+Copyright 2026 Robinhood Agent OS contributors
+
+This product is distributed under the MIT License (see LICENSE).
+
+────────────────────────────────────────────────────────────────────────────
+Apache License 2.0 material included in this product
+────────────────────────────────────────────────────────────────────────────
+
+This product includes software developed as part of Aetheria
+(https://github.com/venymlabs/aetheria).
+
+    Copyright 2026 Venym Labs
+
+    Licensed under the Apache License, Version 2.0 (the "License");
+    you may not use this file except in compliance with the License.
+    You may obtain a copy of the License at
+
+        http://www.apache.org/licenses/LICENSE-2.0
+
+    Unless required by applicable law or agreed to in writing, software
+    distributed under the License is distributed on an "AS IS" BASIS,
+    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+    See the License for the specific language governing permissions and
+    limitations under the License.
+
+A complete copy of the Apache License, Version 2.0 is included in this
+distribution at `licenses/APACHE-2.0.txt`.
+
+The Apache License grants a patent licence in addition to the copyright
+licence, and it terminates for any party that initiates patent litigation
+alleging that the Work infringes a patent (Apache-2.0 §3). Those terms
+continue to govern the files listed below and are not superseded by the MIT
+licence covering the rest of ARI OS. The attribution and NOTICE requirements
+of Apache-2.0 §4 are satisfied by this file plus the per-file headers.
+
+Files derived from Aetheria
+───────────────────────────
+
+  src/kernel/clock.ts               from packages/kernel/src/clock.ts
+  src/kernel/contracts.ts           from packages/shared/src/{enums,policy,intent,
+                                         wallet,kernel,services,events}.ts
+  src/kernel/defaults.ts            from packages/shared/src/schemas.ts (policy
+                                         defaults and overrides only)
+  src/kernel/errors.ts              from packages/shared/src/errors.ts
+  src/kernel/ids.ts                 from packages/shared/src/ids.ts
+  src/kernel/index.ts               from packages/kernel/src/index.ts
+  src/kernel/lock.ts                from packages/kernel/src/lock.ts
+  src/kernel/money.ts               from packages/shared/src/money.ts
+  src/kernel/policy-engine.ts       from packages/kernel/src/policy-engine.ts
+  src/kernel/reconciler.ts          from packages/kernel/src/reconciler.ts
+  src/kernel/secret.ts              from packages/shared/src/branded.ts
+  src/kernel/store.ts               from packages/kernel/src/store.ts
+  src/kernel/trade-gateway.ts       from packages/kernel/src/trade-gateway.ts
+  src/kernel/selfcheck/mocks.ts     from packages/kernel/src/selfcheck/mocks.ts
+  src/kernel/selfcheck/run.ts       from packages/kernel/src/selfcheck/run.ts
+  src/vault/crypto.ts               from packages/vault/src/crypto.ts
+  src/vault/index.ts                from packages/vault/src/index.ts
+  src/vault/keystore.ts             from packages/vault/src/keystore.ts
+  src/chains/solana/broadcaster.ts  from packages/integrations/src/broadcaster.ts
+  src/chains/solana/index.ts        from packages/integrations/src/index.ts and
+                                         packages/wallet/src/index.ts
+  src/chains/solana/jupiter.ts      from packages/integrations/src/jupiter.ts
+  src/chains/solana/local-wallet.ts from packages/wallet/src/local-wallet.ts
+  src/chains/solana/rpc.ts          from packages/integrations/src/rpc.ts
+
+  src/data/index.ts                 from packages/data/src/index.ts
+  src/data/pumpportal.ts            from packages/data/src/pumpportal.ts
+  src/data/signals-engine.ts        from packages/data/src/signals-engine.ts
+  src/data/tape.ts                  from packages/data/src/tape.ts
+  src/data/feed.ts                  NEW in ARI OS — see below
+
+  src/mcp/index.ts                  from packages/mcp/src/index.ts
+  src/mcp/sdk.ts                    from packages/mcp/src/server.ts (its SDK
+                                         imports, inverted into a lazy loader)
+  src/mcp/server.ts                 from packages/mcp/src/server.ts
+  src/mcp/stdio.ts                  from packages/mcp/src/stdio.ts
+  src/bin/mcp.ts                    from packages/mcp/src/bin/aetheria-mcp.ts
+
+  src/strategy/index.ts             from packages/strategy/src/index.ts
+  src/strategy/runner.ts            from packages/strategy/src/runner.ts
+  src/strategy/store.ts             from packages/strategy/src/store.ts
+  src/strategy/executor.ts          NEW in ARI OS — see below
+  src/strategy/view.ts              NEW in ARI OS — see below
+
+  Two Aetheria packages were assessed and deliberately NOT ported:
+
+  `packages/memory/` — `src/cognition/memory/` already implements a strictly
+  stronger durable memory store (revision-checked batches, secret scanning,
+  byte budgets, per-session snapshots) on `node:sqlite`. Porting Aetheria's
+  simpler per-user turn/fact table would have added a second, weaker memory
+  system rather than a capability.
+
+  `packages/channel-telegram/` — `src/telegram/runner.ts` is ARI OS's own
+  chain-agnostic long-poll runner over `src/gateway/channels/`. Adopting the
+  grammY bot would have added a production dependency and a second Telegram
+  implementation to reach the same API.
+
+  `packages/mcp/src/json-schema.ts` was likewise not ported: it is a
+  hand-rolled zod→JSON-Schema shim, and ARI OS already depends on
+  `zod-to-json-schema`, whose output `ToolRegistry.schemas()` emits.
+
+  The local-LLM provider support — `LLM_PROVIDERS` and `LlmConfig` in
+  `src/config/index.ts`, the `extraBody` hook on `OpenAICompatibleTransport`,
+  and `createModelProvider` in `src/app/adapters.ts` — is NOT derived from
+  Aetheria and is not covered by Apache-2.0. Aetheria's equivalent
+  (`packages/gateway/src/gateway.ts`, `packages/shared/src/config.ts`) is a
+  base-URL string map plus a four-line `providerExtraBody` switch over its own
+  `LlmConfig`/`LlmGateway` contracts, none of which ARI OS carried over. What
+  was taken across is a fact about a third party's HTTP API —
+  `chat_template_kwargs.enable_thinking` on a llama.cpp-backed server — and the
+  idea of keying request-body extras off the provider name. The implementation
+  here is a validated provider table feeding ARI OS's own strict-zod
+  `AppConfig`, `ModelCandidate` and `ModelRouter`, and is MIT like the rest of
+  ARI OS. tests/llm-provider.test.ts is likewise new and MIT.
+
+  Aetheria's uncommitted agent-loop work (`packages/agent/src/loop.ts`) was
+  assessed and deliberately NOT ported. Its context compaction — keep the last
+  N tool exchanges, truncate each tool result to a character budget, leave a
+  breadcrumb — is a weaker form of what `src/cognition/context/index.ts`
+  already does: `compileContext` prunes whole tool exchanges so a tool result is
+  never orphaned from its call, protects head, tail and financial messages by
+  kind, redacts secrets before any summarizer sees them, and reports
+  diagnostics. Truncating a tool result mid-string is precisely what a financial
+  transcript must not do. Its per-turn token totals are already recoverable:
+  `AgentRuntime` emits usage on every `model.responded` event and
+  `DurableRunStore.emit` persists the whole event. The one part worth taking was
+  its tool-call id normalization for local servers that omit `id`, which landed
+  in `OpenAICompatibleTransport` — the layer that parses the wire format —
+  rather than in the loop.
+
+  src/chains/solana/spl.ts is NOT derived from Aetheria and is not covered by
+  Apache-2.0. It is a clean-room MIT file written for ARI OS to replace the
+  `@solana/spl-token` dependency: three public on-chain program addresses and
+  one instruction built from the Associated Token Account program's documented
+  wire format. See THIRD_PARTY_NOTICES.md. tests/solana-spl.test.ts is likewise
+  new and MIT.
+
+  Every file under src/perps/ and src/pools/ is derived from the identically
+  named file under packages/perps/src/ and packages/pools/src/ respectively,
+  with these exceptions:
+
+  src/perps/settle.ts               NEW in ARI OS — see below
+  src/pools/signals.ts              from packages/data/src/signals-engine.ts
+                                         (the RugHeat reading and its source
+                                         port only, not the engine)
+
+Tests derived from Aetheria
+───────────────────────────
+
+  tests/kernel-guards.test.ts       from packages/kernel/src/policy-engine.test.ts
+                                         and packages/shared/src/money.test.ts
+  tests/kernel-store.test.ts        (process-lock cases) from
+                                         packages/kernel/src/lock.test.ts
+  tests/kernel-invariants.test.ts   drives packages/kernel/src/selfcheck/run.ts
+  tests/perps-exposure.test.ts      from packages/perps/src/exposure.test.ts
+  tests/perps-guards.test.ts        from packages/perps/src/guards.test.ts
+  tests/perps-intent.test.ts        from packages/perps/src/intent.test.ts
+  tests/perps-liquidation.test.ts   from packages/perps/src/liquidation.test.ts
+  tests/perps-drift-convert.test.ts from packages/perps/src/drift/convert.test.ts
+  tests/perps-drift-venue.test.ts   from packages/perps/src/drift/drift-venue.test.ts
+  tests/perps-tools.test.ts         from packages/perps/src/tools/tools.test.ts
+  tests/pools-guards.test.ts        from packages/pools/src/guards.test.ts
+  tests/pools-meteora-bins.test.ts  from packages/pools/src/meteora/bins.test.ts
+  tests/pools-pumpfun-curve.test.ts from packages/pools/src/pumpfun/curve.test.ts
+  tests/pools-pumpfun-instructions.test.ts
+                                    from packages/pools/src/pumpfun/instructions.test.ts
+  tests/pools-pumpfun-math.test.ts  from packages/pools/src/pumpfun/math.test.ts
+  tests/pools-rebalance-decide.test.ts
+                                    from packages/pools/src/rebalance/decide.test.ts
+  tests/pools-tools.test.ts         from packages/pools/src/tools/tools.test.ts
+  tests/data-tape.test.ts           from packages/data/src/tape.test.ts (the
+                                         PumpPortal cases are new)
+  tests/strategy-runner.test.ts     from packages/strategy/src/runner.test.ts
+                                         (the TradeGateway chokepoint cases are
+                                         new)
+  tests/mcp-server.test.ts          NEW in ARI OS — Aetheria's mcp package had
+                                         no tests; these run with the optional
+                                         SDK absent
+  tests/kernel-perp-settle.test.ts  NEW in ARI OS — covers the venue-position
+                                         settle branch
+  tests/data-signals-mount.test.ts  NEW in ARI OS and MIT — proves the
+                                         `RugHeatSource` port is satisfied and
+                                         that mounting an engine is not a
+                                         relaxation
+
+Modifications made (Apache-2.0 §4(b))
+─────────────────────────────────────
+
+  * `@aetheria/*` package specifiers replaced with relative ESM imports; the
+    pnpm workspace layout is flattened into ARI OS's single-package `src/`.
+  * `src/kernel/store.ts` — the SQLite driver is `node:sqlite`'s `DatabaseSync`
+    (ARI OS's house primitive) instead of better-sqlite3, and the reserve
+    transaction is an explicit BEGIN IMMEDIATE / COMMIT / ROLLBACK block
+    instead of better-sqlite3's `db.transaction()` helper. Schema, cap
+    semantics and the single-writer guarantee are unchanged.
+  * `src/kernel/selfcheck/run.ts` — returns a structured report instead of only
+    printing, so the invariants run both as a script and under vitest.
+  * `src/kernel/contracts.ts` — the Aetheria `shared` package is consolidated
+    into one module; the LLM, tool-registry, Telegram-runtime, env-config and
+    market-data contracts are deliberately not carried over (ARI OS has its
+    own). Doc comments referring to Aetheria-specific commands are reworded.
+  * `src/kernel/lock.ts`, `src/kernel/policy-engine.ts` — user-facing error text
+    rebranded from Aetheria to ARI OS; behaviour unchanged.
+  * `src/chains/solana/rpc.ts` — the constructor also accepts an existing
+    `Connection` so the read ports can be exercised without a live RPC.
+  * `src/kernel/contracts.ts` — `IntentKind` widened from the literal `'swap'`
+    to the four perp kinds and the eight pool/curve kinds; `TradeIntent` gained
+    an optional `perp` leg; the `PositionReader` port and `SettleMode` were
+    added. The Aetheria `shared` tool contract (`ToolContext`, `Preview`,
+    `ToolDefinition`) IS now carried over after all, since `src/perps` and
+    `src/pools` are written against it — renamed to `IntentToolDefinition` /
+    `ToolOutcome` so it does not collide with ARI OS's own registry contract in
+    `src/agent/types.ts`.
+  * `src/kernel/policy-engine.ts` — the "input amount must be positive" rule is
+    gated on the intent kind so a perp reduce/close (which posts no collateral)
+    is not refused, and the bps-of-notional priority-fee ceiling is skipped when
+    the input leg is zero for the same reason. Every other guard is unchanged.
+  * `src/kernel/trade-gateway.ts` — added the `venue-position` settle branch:
+    perp kinds are verified against the venue position delta rather than a token
+    balance delta, and a perp intent with no `PositionReader` mounted is refused
+    before broadcast.
+  * `src/perps/intent.ts` — the `IntentKind` cast in `asTradeIntent` is gone
+    (the widened kernel types make it unnecessary), and the doc comment that
+    described the missing perp settle now describes the implemented one.
+  * `src/pools/intent.ts` — pool intents declare their real kind (`lp_open`,
+    `curve_buy`, …) instead of flattening to `'swap'`.
+  * `src/perps/*`, `src/pools/*` — `node:test` replaced with vitest in the
+    ported tests, which moved from co-located `*.test.ts` into `tests/`;
+    optional interface properties widened to `?: T | undefined` where ARI OS's
+    `exactOptionalPropertyTypes` requires it; three latent unused-binding lint
+    errors fixed.
+  * `@drift-labs/sdk`, `@meteora-ag/dlmm` and `@modelcontextprotocol/sdk` are
+    declared as OPTIONAL peer dependencies rather than dependencies, so they
+    stay out of the lockfile and out of `npm audit --omit=dev`; the lazy
+    loaders' error text names the npm install command.
+  * `src/data/pumpportal.ts` — the `ws` package is replaced by Node's built-in
+    global `WebSocket` (WHATWG, stable in Node 22), so the keyless PumpPortal
+    feed adds no production dependency. That API has no `terminate()` or
+    `removeAllListeners()`, so a monotonic socket generation makes a superseded
+    socket's late frames inert instead; the reconnect and watchdog timers are
+    `unref`'d so a market feed never holds the process open; and a frame whose
+    size does not parse as a finite non-negative number is dropped rather than
+    admitted as `NaN`.
+  * `src/data/signals-engine.ts` — the `RugHeat` interface is imported from
+    `src/pools/signals.ts` (where ARI OS extracted it) rather than redeclared,
+    and the class states `implements RugHeatSource`, so satisfying the port the
+    pools guards read is checked by the compiler. Scoring is unchanged.
+  * `src/data/feed.ts` — NEW. Aetheria wired tape + watcher + engine inside its
+    engine package, which ARI OS does not have. `SignalsFeed` is that wiring
+    with a lifecycle the composition root owns: the engine exists from
+    construction (so `guardRugHeat` always has a source) while `start()` — the
+    network side effect — belongs to `Application.start()`. Auto-following new
+    launches is bounded, and explicitly watched mints are pinned against
+    eviction.
+  * `src/strategy/store.ts` — `node:sqlite`'s `DatabaseSync` instead of
+    better-sqlite3; `.changes` is read through `Number()` because `node:sqlite`
+    returns it as a bigint; `setStatus` returns whether a row was hit so the
+    console can answer 404; an unparseable `params` blob degrades to `{}`
+    rather than throwing inside the tick loop; `all()` was added for the
+    console, which shows every strategy rather than one user's.
+  * `src/strategy/runner.ts` — Aetheria's `SwapRequest` came from its `shared`
+    runtime contract, which ARI OS deliberately did not carry over, so the
+    request shape is declared locally as `StrategySwap`; the tick timer is
+    `unref`'d. The planning logic, the error breaker and the reschedule
+    arithmetic are unchanged.
+  * `src/strategy/executor.ts` — NEW, and the reason the port is honest.
+    Aetheria's runner called an engine-level `swap()` that owned quoting and
+    execution. ARI OS has no such engine, so `gatewayExecutor` quotes through
+    `JupiterClient`, assembles a plain `TradeIntent` and hands it to
+    `TradeGateway.execute()` — the same chokepoint every tool uses. It holds no
+    keypair, no broadcaster and no RPC write. `confirmedByUser` is never set:
+    an unattended schedule cannot assert that a human confirmed a trade, so an
+    unpinned mint is refused by `MINT_NOT_PINNED` rather than waved through.
+  * `src/strategy/view.ts` — NEW. Aetheria surfaced strategies as Telegram
+    text; ARI OS has a console, so this projects a row onto its `StrategyView`,
+    following `src/control/snapshot.ts`'s rule of never inventing a number (no
+    trigger without a real price reading, no budget meter without a budget).
+  * `src/mcp/server.ts` — the tool set is ARI OS's `ToolRegistry` rather than
+    Aetheria's `AnyTool[]`, so the handler delegates to `registry.invoke()`
+    (which already owns validation, capability checks, timeouts and the audit
+    event) instead of re-validating and calling `tool.execute()` itself. The
+    granted capability set comes from the composition root and cannot be
+    widened by a request; a tool outside it is not listed at all.
+  * `src/bin/mcp.ts` — Aetheria's bin threw on every `tools/call` because it
+    had no way to build a tool context. ARI OS composes the same `Application`
+    the daemon does, mounts no custody, and grants read-only capabilities.
+  * Source formatting normalised to ARI OS's Prettier configuration.

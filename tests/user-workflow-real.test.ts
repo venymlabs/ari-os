@@ -5,6 +5,14 @@ import { join } from "node:path";
 import { createUserWorkflow } from "../src/cli/user-workflow.js";
 import { createRemoteServices } from "../src/bin/robinhood-agent-os.js";
 import { posixPermissions } from "./helpers.js";
+import {
+  COMPUTE_BUDGET_PROGRAM,
+  pubkey,
+  TOKEN_PROGRAM,
+} from "./signer-fixtures.js";
+const ACCOUNT = pubkey(1),
+  MINT_IN = pubkey(2),
+  MINT_OUT = pubkey(3);
 const dirs: string[] = [];
 afterEach(() =>
   Promise.all(
@@ -44,8 +52,8 @@ describe("real trading CLI workflow", () => {
       group: "trade",
       action: "quote",
       args: {
-        tokenIn: "0x0000000000000000000000000000000000000001",
-        tokenOut: "0x0000000000000000000000000000000000000002",
+        tokenIn: MINT_IN,
+        tokenOut: MINT_OUT,
         amountIn: "7",
         slippage: "25",
       },
@@ -101,16 +109,16 @@ describe("real trading CLI workflow", () => {
     await user(
       req("quote", {
         side: "buy",
-        tokenIn: "0x0000000000000000000000000000000000000001",
-        tokenOut: "0x0000000000000000000000000000000000000002",
+        tokenIn: MINT_IN,
+        tokenOut: MINT_OUT,
         amountIn: "7",
         slippage: "25",
       }),
     );
     expect(trading.quote).toHaveBeenCalledWith({
       side: "buy",
-      tokenIn: "0x0000000000000000000000000000000000000001",
-      tokenOut: "0x0000000000000000000000000000000000000002",
+      inputMint: MINT_IN,
+      outputMint: MINT_OUT,
       amountIn: 7n,
       slippageBps: 25,
     });
@@ -145,7 +153,7 @@ describe("real trading CLI workflow", () => {
     const out: any = await user({
       group: "setup",
       action: "init",
-      args: { account: "0x0000000000000000000000000000000000000001" },
+      args: { account: ACCOUNT },
     });
     for (const f of [
       "config.json",
@@ -163,11 +171,29 @@ describe("real trading CLI workflow", () => {
     const sign = JSON.parse(
       await readFile(join(d, "sign-policy.json"), "utf8"),
     );
+    // The Solana policy shape the signer actually loads: a cluster, the fee
+    // payers it will sign for, and an explicitly classified instruction per
+    // allowed program. Nothing value-moving is allowed out of the box.
     expect(sign).toMatchObject({
       version: 1,
-      chainIds: [4663],
-      accounts: ["0x0000000000000000000000000000000000000001"],
+      cluster: "mainnet-beta",
+      feePayers: [ACCOUNT],
+      caps: { native: "0" },
+      addressLookupTables: [],
     });
+    expect(sign.programs).toEqual(
+      expect.arrayContaining([
+        {
+          programId: COMPUTE_BUDGET_PROGRAM,
+          discriminator: "02",
+          effect: "fee",
+        },
+        { programId: TOKEN_PROGRAM, discriminator: "05", effect: "none" },
+      ]),
+    );
+    expect(
+      sign.programs.some((p: { effect: string }) => p.effect === "spend"),
+    ).toBe(false);
     expect(JSON.stringify(out)).not.toContain(
       await readFile(join(d, "operator.key"), "utf8"),
     );

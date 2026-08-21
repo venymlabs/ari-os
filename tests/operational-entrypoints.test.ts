@@ -37,7 +37,6 @@ describe("operational package entrypoints", () => {
       "db:status",
       "db:integrity",
       "worker",
-      "indexer",
     ])
       expect(p.scripts[name]).not.toContain("npm run build");
     expect(

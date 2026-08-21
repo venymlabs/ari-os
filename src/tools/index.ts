@@ -1,6 +1,8 @@
 import { z } from "zod";
 import { ToolRegistry } from "../agent/tools/registry.js";
 import { TRADING_CAPABILITIES } from "../agent/types.js";
+import type { VenueMounts } from "./venues.js";
+import { registerVenueTools } from "./venues.js";
 const provenance = z.object({
   observedAt: z.number(),
   source: z.string(),
@@ -21,12 +23,15 @@ type MarketDeps = {
 };
 export interface BuiltInDependencies {
   market?: MarketDeps;
-  noxa?: {
-    launches?: (limit: number) => Promise<unknown>;
-    verify?: (address: string) => Promise<unknown>;
-  };
   risk?: { analyze?: (input: unknown) => unknown };
   simulation?: { simulate?: (input: any) => Promise<unknown> };
+  /**
+   * Perps and liquidity venues. Omitted, those tools simply do not exist —
+   * which is the correct default: an unmounted venue must not be reachable.
+   * See `src/tools/venues.ts`, and note that mounting perps also requires
+   * handing `perpsPositionReader(...)` to the trade gateway.
+   */
+  venues?: VenueMounts;
 }
 const wrap = (source: string, data: unknown) => ({
   data,
@@ -135,18 +140,6 @@ export function registerBuiltInTools(
       ((x) => d.market!.holders!(x.network, x.token, x.limit)),
   );
   reg(
-    "noxa.launches",
-    "Read NOXA launches",
-    z.object({ limit: z.number().int().min(1).max(100).default(50) }),
-    d.noxa?.launches && ((x) => d.noxa!.launches!(x.limit)),
-  );
-  reg(
-    "noxa.verify-token",
-    "Verify NOXA token",
-    z.object({ address: z.string().min(2) }),
-    d.noxa?.verify && ((x) => d.noxa!.verify!(x.address)),
-  );
-  reg(
     "risk.analyze",
     "Risk analysis from configured evidence",
     z.unknown(),
@@ -162,5 +155,15 @@ export function registerBuiltInTools(
     "trade",
     TRADING_CAPABILITIES.ORDER_SIMULATE,
   );
+  if (d.venues) registerVenueTools(r, d.venues);
   return r;
 }
+
+export { registerIntentTool, registerIntentTools } from "./intent-bridge.js";
+export type { IntentToolRuntime } from "./intent-bridge.js";
+export {
+  perpsPositionReader,
+  registerVenueTools,
+  venueToolNames,
+} from "./venues.js";
+export type { VenueMounts } from "./venues.js";

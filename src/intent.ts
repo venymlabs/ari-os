@@ -1,14 +1,20 @@
 import { z } from "zod";
+import { isPublicKey } from "./signer/transaction.js";
 
-const address = z
-  .string()
-  .regex(/^0x[0-9a-fA-F]{40}$/)
-  .transform((v) => v.toLowerCase() as `0x${string}`);
+/**
+ * A base58 SPL mint.
+ *
+ * Deliberately not normalized: base58 is case-sensitive, so two strings
+ * differing only in case are two different mints, and lowercasing one would
+ * silently retarget the trade. The value either decodes to a 32-byte key on the
+ * Ed25519 curve or it is refused.
+ */
+const mint = z.string().refine(isPublicKey, "must be a base58 Solana address");
 const swapIntentSchema = z
   .object({
     kind: z.literal("swap"),
-    tokenIn: address,
-    tokenOut: address,
+    tokenIn: mint,
+    tokenOut: mint,
     amountIn: z
       .string()
       .regex(/^[1-9][0-9]*$/)
@@ -19,6 +25,14 @@ const swapIntentSchema = z
   .strict();
 
 export type SwapIntent = z.infer<typeof swapIntentSchema>;
+/**
+ * The typed boundary an untrusted planner has to come through.
+ *
+ * `.strict()` is the whole point: an intent carries a mint pair, an amount, a
+ * slippage bound and an expiry, and nothing else. A model cannot append raw
+ * instruction data, an extra account, or a program id, because an unknown field
+ * is a parse failure rather than a passthrough.
+ */
 export function normalizeIntent(input: unknown): SwapIntent {
   return swapIntentSchema.parse(input);
 }

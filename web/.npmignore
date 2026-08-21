@@ -1,0 +1,10 @@
+# npm prefers this file over `.gitignore` for this directory, which is exactly
+# why it exists: `.gitignore` excludes `dist/` because a build artefact does not
+# belong in version control, but the PUBLISHED package is the artefact — the
+# root `package.json` `files` list ships `web/dist` so an installed ARI OS can
+# serve its own console. Without this file npm applies `.gitignore` here and
+# silently publishes a daemon with no dashboard.
+#
+# The root `files` allowlist already keeps `web/src`, the vite config and the
+# tsconfigs out of the tarball; only the artefact is shipped, never the source.
+node_modules/

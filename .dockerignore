@@ -14,3 +14,13 @@ secrets*
 Dockerfile*
 compose*.yaml
 tests
+# These patterns are anchored at the context root, so `node_modules` and `dist`
+# above do NOT cover the console's. Exclude them explicitly: the `web` stage
+# runs its own `npm ci` and its own build, so a locally-built dashboard must
+# never be copied in and shadow the one the image builds.
+web/node_modules
+web/dist
+# DO NOT add a `**/.env*` pattern. `web/.env.production` is build configuration,
+# not a secret — it holds the relative API base — and excluding it would produce
+# a console silently stuck on fixtures. The `ARG VITE_ARI_API` in the Dockerfile
+# is the second belt on that.

@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import Fastify from "fastify";
 import { registerTradingApi } from "../src/live-trading/api.js";
+import { pubkey } from "./signer-fixtures.js";
+const IN = pubkey(1),
+  OUT = pubkey(2);
 describe("trading API", () => {
   it("enforces quote/execute scopes and idempotency", async () => {
     const trading = {
@@ -23,8 +26,8 @@ describe("trading API", () => {
           url: "/v1/trading/quote",
           payload: {
             side: "buy",
-            tokenIn: "0x0000000000000000000000000000000000000001",
-            tokenOut: "0x0000000000000000000000000000000000000002",
+            inputMint: IN,
+            outputMint: OUT,
             amountIn: "1",
             slippageBps: 1,
           },
@@ -37,8 +40,8 @@ describe("trading API", () => {
       headers: { "x-scopes": "trading:quote" },
       payload: {
         side: "buy",
-        tokenIn: "0x0000000000000000000000000000000000000001",
-        tokenOut: "0x0000000000000000000000000000000000000002",
+        inputMint: IN,
+        outputMint: OUT,
         amountIn: "1",
         slippageBps: 1,
       },

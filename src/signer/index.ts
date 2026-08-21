@@ -1,452 +1,225 @@
 import {
-  createCipheriv,
-  createDecipheriv,
-  createHash,
-  randomBytes,
-  scrypt as scryptCallback,
-  timingSafeEqual,
-} from "node:crypto";
-import { lstat, open, readFile, realpath } from "node:fs/promises";
-import { dirname, parse, resolve } from "node:path";
-import { DatabaseSync } from "node:sqlite";
-import {
-  getAddress,
-  keccak256,
-  type Address,
-  type Hex,
-  type TransactionSerializable,
-} from "viem";
-import { privateKeyToAccount, type PrivateKeyAccount } from "viem/accounts";
-import {
   SignerWireVerifier,
   type AuthorizationEnvelope,
   type EnvelopeVerifier,
-  type ExecutionState,
   type ReplayStore,
-} from "../execution/authorization/index.js";
-import { enforceRealpathIdentity, permissionsAreUnsafe } from "../platform.js";
+} from "./authorization.js";
+import type { SignerAccount } from "./keystore.js";
+import { evaluatePolicy, type SignPolicy } from "./policy.js";
+import { SqliteReplayStore } from "./replay.js";
+import {
+  attachSignature,
+  decodeTransaction,
+  signatureOf,
+  type DecodedTransaction,
+} from "./transaction.js";
 
-const KDF = { N: 16384, r: 8, p: 1, dkLen: 32 } as const;
-type KdfParams = { N: number; r: number; p: number; dkLen: number };
-function validKdf(x: unknown): x is KdfParams {
-  if (!x || typeof x !== "object") return false;
-  const k = x as any;
-  return (
-    Number.isSafeInteger(k.N) &&
-    k.N >= 16384 &&
-    k.N <= 262144 &&
-    (k.N & (k.N - 1)) === 0 &&
-    Number.isSafeInteger(k.r) &&
-    k.r >= 1 &&
-    k.r <= 16 &&
-    Number.isSafeInteger(k.p) &&
-    k.p >= 1 &&
-    k.p <= 4 &&
-    k.dkLen === 32 &&
-    128 * k.N * k.r <= 512 * 1024 * 1024
-  );
+export * from "./authorization.js";
+export * from "./keystore.js";
+export * from "./policy.js";
+export * from "./replay.js";
+export * from "./transaction.js";
+
+/** A signature the signer has already produced and durably recorded. */
+interface StoredSignature {
+  requestHash: string;
+  transaction: string;
+  signature: string;
+  lastValidBlockHeight?: number;
 }
-const scrypt = (password: string, salt: Buffer, k: KdfParams = KDF) =>
-  new Promise<Buffer>((resolve, reject) =>
-    scryptCallback(
-      password,
-      salt,
-      k.dkLen,
-      { N: k.N, r: k.r, p: k.p, maxmem: 512 * 1024 * 1024 },
-      (error, key) => (error ? reject(error) : resolve(key)),
-    ),
-  );
-type Keystore = {
-  version: 1;
-  address: Address;
-  crypto: {
-    cipher: "aes-256-gcm";
-    kdf: "scrypt";
-    kdfparams: KdfParams;
-    salt: string;
-    iv: string;
-    tag: string;
-    ciphertext: string;
-  };
-};
-export async function assertPrivatePath(
-  path: string,
-  label: string,
-  exists: boolean,
-) {
-  const absolute = resolve(path),
-    root = parse(absolute).root,
-    immediate = dirname(absolute);
-  let current = immediate;
-  while (current !== root) {
-    const st = await lstat(current);
-    if (st.isSymbolicLink()) throw Error(`${label}_parent_symlink_forbidden`);
-    if (!st.isDirectory()) throw Error(`${label}_parent_invalid`);
-    const resolved = await realpath(current);
-    if (enforceRealpathIdentity && resolved !== current)
-      throw Error(`${label}_parent_symlink_forbidden`);
-    if (current === immediate && permissionsAreUnsafe(st))
-      throw Error(`${label}_parent_permissions_unsafe`);
-    current = dirname(current);
-  }
-  if (exists) {
-    const st = await lstat(absolute);
-    if (st.isSymbolicLink()) throw Error(`${label}_symlink_forbidden`);
-    if (!st.isFile()) throw Error(`${label}_format_invalid`);
-    if (permissionsAreUnsafe(st)) throw Error(`${label}_permissions_unsafe`);
-  }
-}
-export async function createEncryptedKeystore(
-  path: string,
-  privateKey: Hex,
-  password: string,
-): Promise<Address> {
-  if (!/^0x[0-9a-fA-F]{64}$/.test(privateKey))
-    throw Error("private_key_invalid");
-  if (!password) throw Error("password_required");
-  await assertPrivatePath(path, "keystore", false);
-  const salt = randomBytes(32),
-    iv = randomBytes(12),
-    key = await scrypt(password, salt);
-  try {
-    const cipher = createCipheriv("aes-256-gcm", key, iv),
-      plain = Buffer.from(privateKey.slice(2), "hex");
-    try {
-      const ciphertext = Buffer.concat([cipher.update(plain), cipher.final()]),
-        account = privateKeyToAccount(privateKey),
-        body: Keystore = {
-          version: 1,
-          address: account.address,
-          crypto: {
-            cipher: "aes-256-gcm",
-            kdf: "scrypt",
-            kdfparams: { ...KDF },
-            salt: salt.toString("hex"),
-            iv: iv.toString("hex"),
-            tag: cipher.getAuthTag().toString("hex"),
-            ciphertext: ciphertext.toString("hex"),
-          },
-        },
-        file = await open(path, "wx", 0o600);
-      try {
-        await file.writeFile(JSON.stringify(body));
-        await file.sync();
-      } finally {
-        await file.close();
-      }
-      return account.address;
-    } finally {
-      plain.fill(0);
-    }
-  } finally {
-    key.fill(0);
-  }
-}
-export async function unlockKeystore(
-  path: string,
-  password: string,
-): Promise<PrivateKeyAccount> {
-  let key: Buffer | undefined, plain: Buffer | undefined;
-  try {
-    await assertPrivatePath(path, "keystore", true);
-    const body = JSON.parse(await readFile(path, "utf8")) as Keystore;
-    if (
-      body.version !== 1 ||
-      body.crypto.cipher !== "aes-256-gcm" ||
-      body.crypto.kdf !== "scrypt"
-    )
-      throw Error("keystore_format_invalid");
-    if (!validKdf(body.crypto.kdfparams)) throw Error("keystore_kdf_invalid");
-    if (
-      !/^[0-9a-f]{64}$/i.test(body.crypto.salt) ||
-      !/^[0-9a-f]{24}$/i.test(body.crypto.iv) ||
-      !/^[0-9a-f]{32}$/i.test(body.crypto.tag) ||
-      !/^[0-9a-f]{64}$/i.test(body.crypto.ciphertext)
-    )
-      throw Error("keystore_format_invalid");
-    key = await scrypt(
-      password,
-      Buffer.from(body.crypto.salt, "hex"),
-      body.crypto.kdfparams,
-    );
-    const decipher = createDecipheriv(
-      "aes-256-gcm",
-      key,
-      Buffer.from(body.crypto.iv, "hex"),
-    );
-    decipher.setAuthTag(Buffer.from(body.crypto.tag, "hex"));
-    plain = Buffer.concat([
-      decipher.update(Buffer.from(body.crypto.ciphertext, "hex")),
-      decipher.final(),
-    ]);
-    const account = privateKeyToAccount(`0x${plain.toString("hex")}`);
-    if (
-      !timingSafeEqual(
-        Buffer.from(account.address.toLowerCase()),
-        Buffer.from(body.address.toLowerCase()),
-      )
-    )
-      throw Error("address mismatch");
-    return account;
-  } catch (error) {
-    if (
-      error instanceof Error &&
-      /permissions|format|symlink|kdf/.test(error.message)
-    )
-      throw error;
-    // Deliberately opaque: decryption failures must not leak which stage
-    // failed (wrong password, tampered ciphertext, corrupt file).
-    // eslint-disable-next-line preserve-caught-error
-    throw Error("keystore_decryption_failed");
-  } finally {
-    key?.fill(0);
-    plain?.fill(0);
-  }
+export interface SignResult {
+  /** base64 signed wire transaction */
+  transaction: string;
+  /** base58 fee-payer signature */
+  signature: string;
 }
 
-export class SqliteReplayStore implements ReplayStore {
-  private db: DatabaseSync;
-  constructor(path: string) {
-    this.db = new DatabaseSync(path);
-    this.db.exec(
-      `PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS signer_replay(id TEXT PRIMARY KEY,expires_at INTEGER NOT NULL,state TEXT NOT NULL,version INTEGER NOT NULL DEFAULT 1,data TEXT,updated_at INTEGER NOT NULL,recovered INTEGER NOT NULL DEFAULT 0)`,
-    );
-    const columns = this.db
-      .prepare("PRAGMA table_info(signer_replay)")
-      .all() as any[];
-    if (!columns.some((x) => x.name === "recovered"))
-      this.db.exec(
-        "ALTER TABLE signer_replay ADD COLUMN recovered INTEGER NOT NULL DEFAULT 0",
-      );
-  }
-  async consume(id: string, expiresAt: number) {
-    if (!id || !Number.isSafeInteger(expiresAt)) return false;
-    return (
-      this.db
-        .prepare(
-          "INSERT OR IGNORE INTO signer_replay(id,expires_at,state,updated_at) VALUES(?,?,'claimed',?)",
-        )
-        .run(id, expiresAt, Date.now()).changes === 1
-    );
-  }
-  async transition(
-    id: string,
-    from: ExecutionState,
-    to: ExecutionState,
-    data?: string,
-  ) {
-    return (
-      this.db
-        .prepare(
-          "UPDATE signer_replay SET state=?,data=?,version=version+1,updated_at=? WHERE id=? AND state=?",
-        )
-        .run(to, data ?? null, Date.now(), id, from).changes === 1
-    );
-  }
-  get(id: string) {
-    return this.db
-      .prepare(
-        "SELECT id,expires_at expiresAt,state,version,data,updated_at updatedAt,recovered FROM signer_replay WHERE id=?",
-      )
-      .get(id) as any;
-  }
-  recoverSigned(id: string) {
-    return this.db
-      .prepare(
-        "UPDATE signer_replay SET recovered=1,version=version+1,updated_at=? WHERE id=? AND state='signed' AND recovered=0 RETURNING data",
-      )
-      .get(Date.now(), id) as { data: string } | undefined;
-  }
-  list(states: ExecutionState[]) {
-    const q = states.map(() => "?").join(",");
-    return this.db
-      .prepare(
-        `SELECT id,expires_at expiresAt,state,version,data,updated_at updatedAt FROM signer_replay WHERE state IN (${q})`,
-      )
-      .all(...states) as any[];
-  }
-  close() {
-    this.db.close();
-  }
-}
-
-export interface SignPolicy {
-  chainIds: readonly number[];
-  accounts: readonly Address[];
-  to: readonly Address[];
-  maxValue: bigint;
-  maxGas: bigint;
-  maxFeePerGas: bigint;
-  maxPriorityFeePerGas: bigint;
-  dataPrefixes: readonly Hex[];
-}
-export interface LoadedSignPolicy extends SignPolicy {
-  version: number;
-  hash: Hex;
-}
-export async function loadSignPolicy(path: string): Promise<LoadedSignPolicy> {
-  const st = await lstat(path);
-  if (st.isSymbolicLink()) throw Error("policy_symlink_forbidden");
-  if (!st.isFile()) throw Error("policy_format_invalid");
-  if (permissionsAreUnsafe(st)) throw Error("policy_permissions_unsafe");
-  const raw = await readFile(path, "utf8"),
-    x = JSON.parse(raw);
-  if (
-    x.version !== 1 ||
-    !Array.isArray(x.chainIds) ||
-    !Array.isArray(x.accounts) ||
-    !Array.isArray(x.to) ||
-    !Array.isArray(x.dataPrefixes)
-  )
-    throw Error("policy_format_invalid");
-  return {
-    ...x,
-    maxValue: BigInt(x.maxValue),
-    maxGas: BigInt(x.maxGas),
-    maxFeePerGas: BigInt(x.maxFeePerGas),
-    maxPriorityFeePerGas: BigInt(x.maxPriorityFeePerGas),
-    hash: `0x${createHash("sha256").update(raw).digest("hex")}`,
-  };
-}
-
+/**
+ * The custody boundary.
+ *
+ * Everything this class checks, it checks against bytes it decoded itself.
+ * The host supplies a transaction and an authorization envelope; the signer
+ * decodes the transaction, proves the envelope describes exactly that
+ * transaction, re-applies its own policy, fences the one-time authorization
+ * id, fences the recent blockhash, and only then produces a signature.
+ */
 export class SignerService {
   constructor(
-    private account: PrivateKeyAccount,
+    private account: SignerAccount,
     private replay: ReplayStore,
     private policy: SignPolicy,
     private wire?: {
       verifier: EnvelopeVerifier;
       audience: string;
+      cluster?: string;
       signerKeyId?: string;
+      authorizationKeyIds?: readonly string[];
       policyHash?: string;
       policyVersion?: number;
       now?: () => number;
-      nonce?: (chainId: number, account: string) => Promise<number>;
+      /** current cluster block height, used to fence blockhash expiry */
+      blockHeight?: () => Promise<number>;
     },
   ) {}
-  private check(tx: TransactionSerializable, claimed: Address) {
-    if (
-      !Number.isSafeInteger(tx.chainId) ||
-      !this.policy.chainIds.includes(tx.chainId!)
-    )
-      throw Error("policy_chain");
-    if (
-      getAddress(claimed) !== getAddress(this.account.address) ||
-      !this.policy.accounts.some((x) => getAddress(x) === getAddress(claimed))
-    )
-      throw Error("policy_account");
-    if (
-      !tx.to ||
-      !this.policy.to.some((x) => getAddress(x) === getAddress(tx.to!))
-    )
-      throw Error("policy_to");
-    if (!Number.isSafeInteger(tx.nonce) || tx.nonce! < 0)
-      throw Error("policy_nonce");
-    if ((tx.value ?? 0n) > this.policy.maxValue) throw Error("policy_value");
-    if ((tx.gas ?? 0n) > this.policy.maxGas) throw Error("policy_gas");
-    if (
-      (tx.maxFeePerGas ?? 0n) > this.policy.maxFeePerGas ||
-      (tx.maxPriorityFeePerGas ?? 0n) > this.policy.maxPriorityFeePerGas
-    )
-      throw Error("policy_fees");
-    if (
-      !this.policy.dataPrefixes.some((x) =>
-        (tx.data ?? "0x").toLowerCase().startsWith(x.toLowerCase()),
-      )
-    )
-      throw Error("policy_data");
-  }
-  private stored(id: string, requestHash: Hex) {
-    const row = (this.replay as any).get?.(id);
-    if (!row) return;
-    let data: any;
+
+  private stored(id: string, requestHash: string): StoredSignature | undefined {
+    if (typeof requestHash !== "string" || !requestHash)
+      throw Error("request_hash_invalid");
+    const row = this.replay.get?.(id);
+    if (!row) return undefined;
+    // Terminal: the blockhash was already dead when signing was attempted.
+    if (row.state === "expired") throw Error("authorization_expired");
+    let data: unknown;
     try {
-      data = JSON.parse(row.data);
+      data = JSON.parse(row.data ?? "");
     } catch {
-      return;
+      return undefined;
     }
-    if (data.requestHash?.toLowerCase() !== requestHash.toLowerCase())
+    if (!data || typeof data !== "object") return undefined;
+    const stored = data as Partial<StoredSignature>;
+    if (stored.requestHash?.toLowerCase() !== requestHash.toLowerCase())
       throw Error("authorization_request_mismatch");
-    if (row.state !== "signed" || !data.raw)
+    if (row.state !== "signed" || !stored.transaction)
       throw Error("authorization_in_progress");
-    return data as {
-      requestHash: Hex;
-      raw: Hex;
-      hash: Hex;
-      recovered?: boolean;
-    };
+    return stored as StoredSignature;
   }
+
+  /**
+   * Blockhash expiry is the Solana replay fence and it is TERMINAL.
+   *
+   * If the transaction's blockhash can no longer land, the authorization is
+   * burned rather than re-signed. Producing a signature over a fresh
+   * blockhash for an already-authorized intent is how double-spends happen,
+   * so the only recovery is a brand-new authorization from the control plane.
+   */
+  private async fenceBlockhash(id: string, lastValidBlockHeight?: number) {
+    if (lastValidBlockHeight === undefined || !this.wire?.blockHeight) return;
+    const height = await this.wire.blockHeight();
+    if (!Number.isSafeInteger(height) || height < 0)
+      throw Error("block_height_invalid");
+    if (height <= lastValidBlockHeight) return;
+    await this.replay.transition?.(
+      id,
+      "claimed",
+      "expired",
+      JSON.stringify({ lastValidBlockHeight, blockHeight: height }),
+    );
+    throw Error("blockhash_expired");
+  }
+
+  /**
+   * Low-level path: sign a transaction against policy alone, with no
+   * authorization envelope. Used by operator tooling and tests; the daemon
+   * itself always goes through `signEnvelope`.
+   */
   async sign(
     authorizationId: string,
-    tx: TransactionSerializable,
-    claimedAccount: Address,
-  ) {
-    this.check(tx, claimedAccount);
-    const requestHash = keccak256(
-      await import("viem").then((v) => v.serializeTransaction(tx)),
-    );
-    const prior = this.stored(authorizationId, requestHash);
-    if (prior) return prior.raw;
+    transaction: string,
+    claimedFeePayer: string,
+    lastValidBlockHeight?: number,
+  ): Promise<SignResult> {
+    const decoded = decodeTransaction(transaction);
+    evaluatePolicy(decoded, this.policy, this.account.publicKey);
+    if (decoded.feePayer !== claimedFeePayer) throw Error("policy_fee_payer");
+    const prior = this.stored(authorizationId, decoded.messageHash);
+    if (prior)
+      return { transaction: prior.transaction, signature: prior.signature };
     if (!(await this.replay.consume(authorizationId, Date.now() + 60_000)))
       throw Error("envelope_replayed");
-    return this.signClaimed(authorizationId, tx, requestHash);
+    await this.fenceBlockhash(authorizationId, lastValidBlockHeight);
+    return this.signClaimed(authorizationId, decoded, lastValidBlockHeight);
   }
+
   private async signClaimed(
     id: string,
-    tx: TransactionSerializable,
-    requestHash: Hex,
-  ) {
+    decoded: DecodedTransaction,
+    lastValidBlockHeight?: number,
+  ): Promise<SignResult> {
     try {
-      const raw = await this.account.signTransaction(tx),
-        data = JSON.stringify({ requestHash, raw, hash: keccak256(raw) });
+      const raw = this.account.signMessage(decoded.messageBytes),
+        result = attachSignature(decoded, raw),
+        data = JSON.stringify({
+          requestHash: decoded.messageHash,
+          ...result,
+          ...(lastValidBlockHeight === undefined
+            ? {}
+            : { lastValidBlockHeight }),
+        });
       if (
         this.replay.transition &&
         !(await this.replay.transition(id, "claimed", "signed", data))
       )
         throw Error("replay_fencing_lost");
-      return raw;
+      return result;
     } catch (e) {
       await this.replay.transition?.(id, "claimed", "failed");
       throw e;
     }
   }
-  result(id: string, requestHash: Hex, recoverRaw = false) {
+
+  /**
+   * Durable result lookup. A signature that already exists always stays
+   * retrievable — withholding it would strand an execution whose transaction
+   * may already have landed. `recoverRaw` releases the signed bytes to
+   * exactly one caller.
+   */
+  result(id: string, requestHash: string, recoverRaw = false) {
+    if (this.replay.get?.(id)?.state === "expired")
+      return { state: "expired" as const };
     const data = this.stored(id, requestHash);
     if (!data) return { state: "not_found" as const };
-    const result: any = { state: "signed", hash: data.hash };
+    const result: {
+      state: "signed";
+      signature: string;
+      transaction?: string;
+    } = { state: "signed", signature: data.signature };
     if (recoverRaw) {
-      const claimed = (this.replay as any).recoverSigned?.(id);
+      const claimed = (
+        this.replay as {
+          recoverSigned?: (id: string) => { data: string } | undefined;
+        }
+      ).recoverSigned?.(id);
       if (claimed) {
-        let recovered: any;
+        let recovered: Partial<StoredSignature>;
         try {
           recovered = JSON.parse(claimed.data);
         } catch {
           throw Error("signed_result_invalid");
         }
-        result.raw = recovered.raw;
+        if (!recovered.transaction) throw Error("signed_result_invalid");
+        result.transaction = recovered.transaction;
       }
     }
     return result;
   }
-  async signEnvelope(serialized: Hex, envelope: AuthorizationEnvelope) {
+
+  /**
+   * The daemon path. Order is deliberate: decode, prove the envelope matches
+   * the decode, re-check policy — and only then burn the one-time
+   * authorization. A request rejected by policy never consumes its
+   * authorization id.
+   */
+  async signEnvelope(
+    transaction: string,
+    envelope: AuthorizationEnvelope,
+  ): Promise<SignResult> {
     if (!this.wire) throw Error("wire_verifier_required");
-    const requestHash = keccak256(serialized),
-      prior = this.stored(envelope.claims.id, requestHash);
-    const replayStore: ReplayStore = prior
-      ? { consume: async () => true }
-      : this.replay;
-    const verified = await new SignerWireVerifier({
-      ...this.wire,
-      replayStore,
-    }).verify(serialized, envelope);
-    this.check(verified.decoded, envelope.claims.account);
-    return (
-      prior?.raw ??
-      this.signClaimed(envelope.claims.id, verified.decoded, requestHash)
-    );
+    const decoded = decodeTransaction(transaction);
+    const id = envelope?.claims?.id;
+    if (typeof id !== "string" || !id) throw Error("envelope_invalid");
+    const prior = this.stored(id, decoded.messageHash);
+    await new SignerWireVerifier(this.wire).verify(decoded, envelope);
+    evaluatePolicy(decoded, this.policy, this.account.publicKey);
+    if (prior)
+      return { transaction: prior.transaction, signature: prior.signature };
+    if (!(await this.replay.consume(id, envelope.claims.expiresAt)))
+      throw Error("envelope_replayed");
+    await this.fenceBlockhash(id, envelope.claims.lastValidBlockHeight);
+    return this.signClaimed(id, decoded, envelope.claims.lastValidBlockHeight);
   }
 }
 
+/** Newline-delimited JSON framing for the local socket protocol. */
 export class JsonFrameDecoder {
   private pending = Buffer.alloc(0);
   constructor(private max = 1024 * 1024) {}
@@ -471,68 +244,130 @@ export class JsonFrameDecoder {
     return out;
   }
 }
+
 export type RpcCall = (method: string, params: unknown[]) => Promise<any>;
+
+/**
+ * Broadcast an already-signed, already-persisted transaction.
+ *
+ * The signed bytes reach durable storage before they reach the network, and
+ * the returned signature must equal the one this process computed — an RPC
+ * that answers with a different signature is treated as an unresolved
+ * broadcast, never as a success.
+ */
 export async function broadcastSigned(
   store: SqliteReplayStore,
   id: string,
-  raw: Hex,
+  transaction: string,
   rpc: RpcCall,
 ) {
-  const expected = keccak256(raw),
-    hash = await rpc("eth_sendRawTransaction", [raw]);
-  if (
-    typeof hash !== "string" ||
-    hash.toLowerCase() !== expected.toLowerCase()
-  ) {
+  const expected = signatureOf(transaction);
+  let lastValidBlockHeight: number | undefined;
+  try {
+    const prior = JSON.parse(
+      store.get(id)?.data ?? "{}",
+    ) as Partial<StoredSignature>;
+    lastValidBlockHeight = prior.lastValidBlockHeight;
+  } catch {
+    lastValidBlockHeight = undefined;
+  }
+  const returned = await rpc("sendTransaction", [
+    transaction,
+    {
+      encoding: "base64",
+      skipPreflight: false,
+      preflightCommitment: "confirmed",
+      maxRetries: 0,
+    },
+  ]);
+  if (typeof returned !== "string" || returned !== expected) {
     await store.transition(
       id,
       "signed",
       "reconciliation",
-      JSON.stringify({ expected, returned: hash }),
+      JSON.stringify({ expected, returned, lastValidBlockHeight }),
     );
-    throw Error("broadcast_hash_mismatch");
+    throw Error("broadcast_signature_mismatch");
   }
   if (
     !(await store.transition(
       id,
       "signed",
       "broadcast",
-      JSON.stringify({ hash, raw }),
+      JSON.stringify({
+        signature: returned,
+        transaction,
+        lastValidBlockHeight,
+      }),
     ))
   )
     throw Error("broadcast_state_invalid");
-  return hash as Hex;
+  return returned;
 }
+
+/**
+ * Settle durable broadcast records without ever signing or resubmitting.
+ *
+ * A status with an error is `reverted`; a confirmed/finalized status is
+ * `confirmed`. A signature the cluster has never seen once its blockhash is
+ * past `lastValidBlockHeight` is `dropped` — terminal, because that
+ * transaction can no longer land and must not be re-signed.
+ */
 export async function reconcileTransactions(
   store: SqliteReplayStore,
   rpc: RpcCall,
 ) {
   for (const row of store.list(["broadcast", "reconciliation"])) {
-    let data: any;
+    let data: Record<string, any>;
     try {
       data = JSON.parse(row.data ?? "{}");
     } catch {
       continue;
     }
-    const hash = data.hash ?? data.expected;
-    if (!hash) continue;
-    const receipt = await rpc("eth_getTransactionReceipt", [hash]);
-    if (receipt) {
+    const signature = data.signature ?? data.expected;
+    if (typeof signature !== "string" || !signature) continue;
+    const response = await rpc("getSignatureStatuses", [
+      [signature],
+      { searchTransactionHistory: true },
+    ]);
+    const status = response?.value?.[0] ?? null;
+    if (status) {
+      const settled = status.err
+        ? "reverted"
+        : status.confirmationStatus === "finalized" ||
+            status.confirmationStatus === "confirmed"
+          ? "confirmed"
+          : row.state === "reconciliation"
+            ? "broadcast"
+            : undefined;
+      if (settled)
+        await store.transition(
+          row.id,
+          row.state,
+          settled,
+          JSON.stringify({
+            signature,
+            status,
+            ...(data.transaction ? { transaction: data.transaction } : {}),
+            ...(data.lastValidBlockHeight === undefined
+              ? {}
+              : { lastValidBlockHeight: data.lastValidBlockHeight }),
+          }),
+        );
+      continue;
+    }
+    if (!Number.isSafeInteger(data.lastValidBlockHeight)) continue;
+    const height = await rpc("getBlockHeight", [{ commitment: "confirmed" }]);
+    if (Number.isSafeInteger(height) && height > data.lastValidBlockHeight)
       await store.transition(
         row.id,
         row.state,
-        receipt.status === "0x1" ? "confirmed" : "reverted",
-        JSON.stringify({ hash, receipt }),
-      );
-      continue;
-    }
-    const tx = await rpc("eth_getTransactionByHash", [hash]);
-    if (tx && row.state === "reconciliation")
-      await store.transition(
-        row.id,
-        "reconciliation",
-        "broadcast",
-        JSON.stringify({ hash, raw: data.raw }),
+        "dropped",
+        JSON.stringify({
+          signature,
+          lastValidBlockHeight: data.lastValidBlockHeight,
+          blockHeight: height,
+        }),
       );
   }
 }

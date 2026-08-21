@@ -5,108 +5,188 @@ import {
   type SimulationRequest,
   type SimulationResult,
 } from "./simulation.js";
-import { keccak256 } from "viem";
+import { signatureOf } from "../signer/transaction.js";
 import type {
   AuthorizationEnvelope,
-  SignerWireVerifier,
+  HostAuthorizationVerifier,
 } from "./authorization/index.js";
+import type { SignerSignResponse } from "./authorization/wire.js";
 
 interface Dependencies {
   simulate: (request: SimulationRequest) => Promise<SimulationResult>;
-  wireVerifier?: SignerWireVerifier;
-  signSerialized?: (serialized: `0x${string}`) => Promise<`0x${string}`>;
-  broadcast?: (signed: `0x${string}`) => Promise<`0x${string}`>;
+  wireVerifier?: HostAuthorizationVerifier;
+  /** Cross the custody boundary. Returns the signed wire plus its signature. */
+  sign?: (
+    transaction: string,
+    envelope: AuthorizationEnvelope,
+  ) => Promise<SignerSignResponse>;
+  broadcast?: (signed: string) => Promise<string>;
 }
 interface ExecutionContext {
   policyHash: string;
-  currentBlock: bigint;
-  maxBlockLag: bigint;
+  currentSlot: bigint;
+  maxSlotLag: bigint;
   allowedAssets: ReadonlySet<string>;
+  /** current cluster block height, for the blockhash-expiry fence */
+  currentBlockHeight?: number;
 }
 export interface AuthorizedExecution {
-  serialized: `0x${string}`;
+  /** base64 unsigned wire transaction */
+  transaction: string;
   envelope: AuthorizationEnvelope;
 }
+
+/**
+ * The execution chokepoint.
+ *
+ * Two rules survive the move from EVM to Solana unchanged, because neither was
+ * ever about the chain:
+ *
+ *  - **Simulate before approve.** `prepare` is the only way to obtain the
+ *    evidence an authorization can be issued against, and it refuses to return
+ *    anything a safety check rejected.
+ *  - **Persist signed bytes before broadcast.** The signature reaches durable
+ *    storage before it reaches the network, so a crash in between is
+ *    recoverable by *looking up* the signature rather than producing a second
+ *    one.
+ *
+ * What changes is the identity being fenced. There is no account nonce to
+ * compare, so the fence is the recent blockhash and its last valid block
+ * height, and crossing it is terminal.
+ */
 export class ExecutionGateway {
   constructor(private readonly dependencies: Dependencies) {}
+
   async prepare(transaction: PreparedTransaction, context: ExecutionContext) {
     const request = buildSimulationRequest(transaction, context.policyHash),
       simulation = await this.dependencies.simulate(request);
     assertSimulationSafe(simulation, {
-      expectedTransactionHash: request.transactionHash,
-      currentBlock: context.currentBlock,
-      maxBlockLag: context.maxBlockLag,
+      expectedMessageHash: request.messageHash,
+      currentSlot: context.currentSlot,
+      maxSlotLag: context.maxSlotLag,
       allowedAssets: context.allowedAssets,
+      ...(context.currentBlockHeight === undefined
+        ? {}
+        : {
+            currentBlockHeight: context.currentBlockHeight,
+            lastValidBlockHeight: request.lastValidBlockHeight,
+          }),
     });
     return {
       status: "SIMULATED" as const,
-      transactionHash: request.transactionHash,
+      messageHash: request.messageHash,
       request,
       simulation,
     };
   }
+
   async execute(input: AuthorizedExecution) {
-    if (!input?.envelope || !input.serialized)
+    if (!input?.envelope || !input.transaction)
       throw Error("authorization_envelope_required");
-    if (
-      !this.dependencies.wireVerifier ||
-      !this.dependencies.signSerialized ||
-      !this.dependencies.broadcast
-    )
-      throw Error("signing_disabled");
-    const verified = await this.dependencies.wireVerifier.verify(
-      input.serialized,
-      input.envelope,
-    );
-    let signed: `0x${string}`;
+    const { wireVerifier, sign, broadcast } = this.dependencies;
+    if (!wireVerifier || !sign || !broadcast) throw Error("signing_disabled");
+    const verified = await wireVerifier.verify(
+        input.transaction,
+        input.envelope,
+      ),
+      id = input.envelope.claims.id;
+
+    let signed: SignerSignResponse;
     try {
-      signed = await this.dependencies.signSerialized(verified.serialized);
+      signed = await sign(verified.transaction, input.envelope);
     } catch (error) {
       await verified.replayStore.transition?.(
-        input.envelope.claims.id,
+        id,
         "claimed",
         "failed",
         String(error),
       );
       throw error;
     }
-    const signedHash = keccak256(signed);
+    // The signature the signer reports must be the one actually attached to the
+    // bytes it returned. A mismatch means the two are not the same
+    // transaction, and neither may be trusted.
+    let attached: string;
+    try {
+      attached = signatureOf(signed.transaction);
+    } catch {
+      attached = "";
+    }
+    if (!attached || attached !== signed.signature) {
+      await verified.replayStore.transition?.(
+        id,
+        "claimed",
+        "failed",
+        "signer_signature_mismatch",
+      );
+      throw Error("signer_signature_mismatch");
+    }
     await verified.replayStore.transition?.(
-      input.envelope.claims.id,
+      id,
       "claimed",
       "signed",
-      signedHash,
+      JSON.stringify({
+        signature: signed.signature,
+        transaction: signed.transaction,
+      }),
     );
-    let hash: `0x${string}`;
+
+    // The daemon can broadcast on the host's behalf, having already persisted
+    // the signature on its own side. Its answer is still checked, never taken.
+    if (signed.broadcast !== undefined) {
+      if (signed.broadcast !== signed.signature) {
+        await verified.replayStore.transition?.(
+          id,
+          "signed",
+          "reconciliation",
+          signed.broadcast,
+        );
+        throw Error("broadcast_signature_mismatch");
+      }
+      await verified.replayStore.transition?.(
+        id,
+        "signed",
+        "broadcast",
+        signed.signature,
+      );
+      return {
+        status: "BROADCAST" as const,
+        messageHash: input.envelope.claims.messageHash,
+        signature: signed.signature,
+      };
+    }
+
+    let signature: string;
     try {
-      hash = await this.dependencies.broadcast(signed);
+      signature = await broadcast(signed.transaction);
     } catch (error) {
       await verified.replayStore.transition?.(
-        input.envelope.claims.id,
+        id,
         "signed",
         "reconciliation",
         String(error),
       );
       throw error;
     }
-    if (
-      !/^0x[0-9a-fA-F]{64}$/.test(hash) ||
-      hash.toLowerCase() !== signedHash.toLowerCase()
-    ) {
+    if (signature !== signed.signature) {
       await verified.replayStore.transition?.(
-        input.envelope.claims.id,
+        id,
         "signed",
         "reconciliation",
-        hash,
+        String(signature),
       );
-      throw Error("broadcast_hash_mismatch");
+      throw Error("broadcast_signature_mismatch");
     }
     await verified.replayStore.transition?.(
-      input.envelope.claims.id,
+      id,
       "signed",
       "broadcast",
-      hash,
+      signature,
     );
-    return { status: "BROADCAST" as const, transactionHash: signedHash, hash };
+    return {
+      status: "BROADCAST" as const,
+      messageHash: input.envelope.claims.messageHash,
+      signature,
+    };
   }
 }

@@ -24,6 +24,11 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      # The daemon serves the dashboard, so the gate must build it. Without
+      # this, web/dist is absent in CI and the end-to-end control-plane test
+      # silently skips the one assertion that proves the console is served.
+      - run: npm ci --prefix web
+      - run: npm run build --prefix web
       - run: npm run verify
 
   audit:

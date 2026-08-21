@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+# The daemon serves this bundle; the API base is part of the build contract.
+!.env.production
+*.log

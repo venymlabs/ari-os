@@ -252,6 +252,18 @@ export interface OpenAICompatibleOptions {
   credential?: CredentialReference;
   fetch: typeof globalThis.fetch;
   defaultHeaders?: Readonly<Record<string, string>>;
+  /**
+   * Provider-specific request-body fields merged into every completion.
+   *
+   * The OpenAI chat schema is a lowest common denominator; a self-hosted
+   * llama.cpp server accepts more (`chat_template_kwargs`, for one, which is
+   * how a reasoning model is told not to emit its thinking trace). The
+   * transport stays provider-neutral by never naming any of them: the caller
+   * supplies the fields and they are merged UNDER the canonical ones, so
+   * `model`, `messages`, `tools`, `tool_choice`, `max_tokens`, `temperature`
+   * and `stream` always come from the request and can never be overridden here.
+   */
+  extraBody?: Readonly<Record<string, unknown>>;
   now?: () => number;
 }
 
@@ -270,7 +282,11 @@ const responseSchema = z
                   .array(
                     z
                       .object({
-                        id: z.string().min(1),
+                        // Optional, not absent-tolerant: a present id must
+                        // still be a non-empty string. Several llama.cpp-backed
+                        // local servers omit the field entirely — see the
+                        // synthesis in `complete()`.
+                        id: z.string().min(1).optional(),
                         type: z.literal("function"),
                         function: z
                           .object({
@@ -316,7 +332,11 @@ export class OpenAICompatibleTransport implements ModelTransport {
     headers["content-type"] = "application/json";
     if (token) headers.Authorization = `Bearer ${token}`;
     const messages = request.messages.map(serializeMessage);
+    // Spread first, deliberately: every canonical field below overwrites a
+    // same-named extra, so a provider profile cannot redirect the model,
+    // rewrite the transcript or switch on streaming.
     const body = {
+      ...this.options.extraBody,
       model: request.model,
       messages,
       ...(request.tools
@@ -361,12 +381,17 @@ export class OpenAICompatibleTransport implements ModelTransport {
     const data = responseSchema.parse(await response.json());
     const choice = data.choices[0]!;
     const seen = new Set<string>();
-    const toolCalls = (choice.message.tool_calls ?? []).map((call) => {
-      if (seen.has(call.id))
-        throw new SyntaxError(`Duplicate tool call ID: ${call.id}`);
-      seen.add(call.id);
+    const toolCalls = (choice.message.tool_calls ?? []).map((call, index) => {
+      // A missing id is a gap in the server's OpenAI emulation, not an
+      // ambiguity: the position in the array already identifies the call, and
+      // the runtime needs *some* id to match the tool result back. Synthesize
+      // one. A DUPLICATE id stays fatal — that is a server claiming two
+      // distinct calls are the same one, which no positional fix can repair.
+      const id = call.id ?? `call_${index}`;
+      if (seen.has(id)) throw new SyntaxError(`Duplicate tool call ID: ${id}`);
+      seen.add(id);
       return {
-        id: call.id,
+        id,
         name: call.function.name,
         arguments: parseArguments(call.function.arguments),
       };

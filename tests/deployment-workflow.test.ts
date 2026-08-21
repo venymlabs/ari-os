@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { pubkey } from "./signer-fixtures.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 const execFileAsync = promisify(execFile);
@@ -47,7 +48,10 @@ describe("clone-to-trade deployment", () => {
     expect(trading).toContain("--key-fd");
     expect(trading).not.toMatch(/--private-key|--password\s+\S+/);
     expect(trading).toContain("npm run cli -- trade revoke --token");
-    expect(trading).toContain("0x095ea7b3");
+    // The signer policy prerequisite for a live revoke. Was the ERC-20
+    // approve selector `0x095ea7b3`; on Solana the analogue is the SPL Token
+    // program plus the `Revoke` instruction discriminator.
+    expect(trading).toContain("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
     expect(readme).not.toContain("read-only and cannot move funds");
   });
   it("describes the production package honestly and ships every deployment asset", async () => {
@@ -71,7 +75,7 @@ describe("clone-to-trade deployment", () => {
         env: {
           ...process.env,
           RPC_URL: "https://rpc.example",
-          TRADING_ACCOUNT: "0x0000000000000000000000000000000000000001",
+          TRADING_ACCOUNT: pubkey(1),
           TRADING_MAX_AMOUNT_IN: "1",
           API_BEARER_TOKEN_SHA256:
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -89,7 +93,14 @@ describe("clone-to-trade deployment", () => {
       ])
         expect(stdout).toContain(value);
       expect(stdout).not.toContain("host.docker.internal");
+      // The NOXA indexer service is gone with the launchpad it indexed.
+      expect(stdout).not.toContain("indexer");
+      // No chain id: the cluster is derived from NETWORK, not configured.
+      expect(stdout).not.toContain("CHAIN_ID");
     },
+    // Two `docker compose config` round-trips. The 5s default is not enough
+    // for a cold daemon under a loaded suite.
+    60000,
   );
   it("ships setup and reconcile operator scripts plus ordered hardened systemd units", async () => {
     const pkg = JSON.parse(await readFile("package.json", "utf8"));

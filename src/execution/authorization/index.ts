@@ -1,46 +1,54 @@
 import { randomUUID } from "node:crypto";
-import { keccak256, parseTransaction } from "viem";
+import {
+  AUTHORIZATION_PROTOCOL,
+  SignerWireVerifier,
+  canonicalClaims,
+  type AuthorizationClaims,
+  type AuthorizationEnvelope,
+  type AuthorizationReferences,
+  type EnvelopeVerifier,
+  type ReplayStore,
+} from "../../signer/authorization.js";
+import { decodeTransaction } from "../../signer/transaction.js";
 import {
   simulationEvidenceHash,
+  simulationRequestOf,
   type SimulationEvidence,
   type SimulationRequest,
 } from "../simulation.js";
-export interface AuthorizationReferences {
-  quoteHash: string;
-  policyHash: string;
-  policyVersion: number;
-  riskHash: string;
-  reservationId: string;
-  approvalId: string;
-  audience: string;
-  signerKeyId?: string;
-}
-export interface AuthorizationClaims extends AuthorizationReferences {
-  protocol: string;
-  version: number;
-  id: string;
-  chainId: number;
-  account: `0x${string}`;
-  nonce: number;
-  serialized: `0x${string}`;
-  transactionHash: `0x${string}`;
-  to: `0x${string}`;
-  data: `0x${string}`;
-  value: string;
-  gas: string;
-  type: string;
-  gasPrice?: string;
-  maxFeePerGas?: string;
-  maxPriorityFeePerGas?: string;
-  accessList: readonly unknown[];
-  simulationHash: `0x${string}`;
-  issuedAt: number;
-  expiresAt: number;
-}
-export interface AuthorizationEnvelope {
-  claims: AuthorizationClaims;
-  signature: string;
-}
+
+/**
+ * Issuing side of the custody boundary.
+ *
+ * The claim types are imported from `src/signer/authorization.js` rather than
+ * redeclared here. The signer decodes the transaction itself and refuses to
+ * sign unless its decode and these claims agree field for field, so any
+ * divergence between the two shapes is a runtime rejection at best and a
+ * silently unenforced check at worst. Sharing one declaration makes it a
+ * compile error instead.
+ *
+ * One envelope binds one operator decision to one exact transaction: the wire
+ * bytes, the message bytes an Ed25519 signature commits to, every program id,
+ * every static account key, every instruction's data, and the recent blockhash
+ * with the block height past which it dies.
+ */
+
+export {
+  AUTHORIZATION_PROTOCOL,
+  canonicalClaims,
+  InMemoryReplayStore,
+} from "../../signer/authorization.js";
+export type {
+  AuthorizationClaims,
+  AuthorizationEnvelope,
+  AuthorizationInstructionClaim,
+  AuthorizationReferences,
+  EnvelopeVerifier,
+  ExecutionState,
+  ReplayStore,
+} from "../../signer/authorization.js";
+export * from "./wire.js";
+
 export interface AuthorizationChecks {
   quote: (hash: string) => Promise<boolean>;
   policy: (hash: string) => Promise<boolean>;
@@ -48,7 +56,17 @@ export interface AuthorizationChecks {
   reservation: (id: string) => Promise<boolean>;
   approval: (id: string) => Promise<boolean>;
   simulation: (hash: string) => Promise<boolean>;
-  nonce: (chainId: number, account: string) => Promise<number | boolean>;
+  /**
+   * Current cluster block height, or `true` when the caller cannot observe it.
+   *
+   * This replaces the EVM account-nonce check. Solana has no nonce: a
+   * transaction is fenced by the recent blockhash it was built with, and once
+   * the cluster passes `lastValidBlockHeight` that transaction can never land.
+   * Issuing an authorization for a dead blockhash would produce a signature
+   * that is useless at best — and at worst invites a re-sign under a fresh
+   * blockhash, which is how the same intent gets executed twice.
+   */
+  blockhash: (cluster: string) => Promise<number | boolean>;
   consumeApprovalReservation?: (
     approval: string,
     reservation: string,
@@ -56,30 +74,11 @@ export interface AuthorizationChecks {
   ) => Promise<boolean>;
   snapshotVersion?: () => Promise<string>;
 }
+
 export interface EnvelopeSigner {
   sign: (canonicalClaims: string) => Promise<string>;
 }
-export interface EnvelopeVerifier {
-  verify: (
-    canonicalClaims: string,
-    signature: string,
-    keyId?: string,
-  ) => Promise<boolean>;
-}
-const normalize = (v: unknown): unknown =>
-  typeof v === "bigint"
-    ? v.toString()
-    : Array.isArray(v)
-      ? v.map(normalize)
-      : v && typeof v === "object"
-        ? Object.fromEntries(
-            Object.entries(v)
-              .sort(([a], [b]) => a.localeCompare(b))
-              .map(([k, x]) => [k, normalize(x)]),
-          )
-        : v;
-export const canonicalClaims = (c: AuthorizationClaims) =>
-  JSON.stringify(normalize(c));
+
 export class AuthorizationIssuer {
   get signerKeyId() {
     return this.dependencies.signerKeyId;
@@ -98,7 +97,7 @@ export class AuthorizationIssuer {
     r: SimulationRequest,
     e: SimulationEvidence,
     refs: AuthorizationReferences,
-  ) {
+  ): Promise<AuthorizationEnvelope> {
     const ttl = this.dependencies.ttlMs ?? 30_000;
     if (
       !Number.isSafeInteger(ttl) ||
@@ -108,10 +107,24 @@ export class AuthorizationIssuer {
       throw Error("authorization_ttl_invalid");
     if (refs.policyHash !== r.policyHash)
       throw Error("authorization_policy_invalid");
+    // Re-decode the persisted bytes. A quote survives restarts on disk, so the
+    // projection it carries is re-derived here rather than trusted.
+    const decoded = decodeTransaction(r.transaction);
+    if (
+      JSON.stringify(
+        simulationRequestOf(
+          decoded,
+          r.cluster,
+          r.lastValidBlockHeight,
+          r.policyHash,
+        ),
+      ) !== JSON.stringify(r)
+    )
+      throw Error("authorization_transaction_invalid");
     const { hash, ...body } = e;
     if (
       hash !== simulationEvidenceHash(body) ||
-      e.transactionHash !== r.transactionHash
+      e.messageHash !== r.messageHash
     )
       throw Error("authorization_simulation_invalid");
     const c = this.dependencies.checks,
@@ -124,10 +137,16 @@ export class AuthorizationIssuer {
       ["approval", c.approval(refs.approvalId)],
       ["simulation", c.simulation(e.hash)],
       [
-        "nonce",
+        "blockhash",
         c
-          .nonce(r.transaction.chainId, r.transaction.from)
-          .then((n) => n === true || n === r.transaction.nonce),
+          .blockhash(r.cluster)
+          .then(
+            (h) =>
+              h === true ||
+              (typeof h === "number" &&
+                Number.isSafeInteger(h) &&
+                h <= r.lastValidBlockHeight),
+          ),
       ],
     ];
     for (const [n, p] of validations)
@@ -135,7 +154,6 @@ export class AuthorizationIssuer {
     if (start !== undefined && start !== (await c.snapshotVersion?.()))
       throw Error("authorization_snapshot_changed");
     const issuedAt = (this.dependencies.now ?? Date.now)(),
-      t = r.transaction,
       id = randomUUID();
     if (
       c.consumeApprovalReservation &&
@@ -149,27 +167,20 @@ export class AuthorizationIssuer {
     const claims: AuthorizationClaims = {
       ...refs,
       ...(this.signerKeyId ? { signerKeyId: this.signerKeyId } : {}),
-      protocol: "robinhood-execution-authorization",
+      protocol: AUTHORIZATION_PROTOCOL,
       version: 1,
       id,
-      chainId: t.chainId,
-      account: t.from,
-      nonce: t.nonce,
-      serialized: r.serialized,
-      transactionHash: r.transactionHash,
-      to: t.to,
-      data: t.data,
-      value: String(t.value),
-      gas: String(t.gas),
-      type: t.type ?? "legacy",
-      ...(t.gasPrice === undefined ? {} : { gasPrice: String(t.gasPrice) }),
-      ...(t.maxFeePerGas === undefined
-        ? {}
-        : { maxFeePerGas: String(t.maxFeePerGas) }),
-      ...(t.maxPriorityFeePerGas === undefined
-        ? {}
-        : { maxPriorityFeePerGas: String(t.maxPriorityFeePerGas) }),
-      accessList: t.accessList ?? [],
+      cluster: r.cluster,
+      feePayer: r.feePayer,
+      transaction: r.transaction,
+      message: r.message,
+      messageHash: r.messageHash,
+      recentBlockhash: r.recentBlockhash,
+      lastValidBlockHeight: r.lastValidBlockHeight,
+      programIds: r.programIds,
+      accountKeys: r.accountKeys,
+      instructions: r.instructions,
+      addressTableLookups: r.addressTableLookups,
       simulationHash: e.hash,
       issuedAt,
       expiresAt: issuedAt + ttl,
@@ -180,127 +191,74 @@ export class AuthorizationIssuer {
     };
   }
 }
-export type ExecutionState =
-  | "issued"
-  | "claimed"
-  | "signing"
-  | "signed"
-  | "broadcast"
-  | "reconciliation"
-  | "confirmed"
-  | "reverted"
-  | "dropped"
-  | "failed";
-export interface ReplayStore {
-  consume(id: string, expiresAt: number): Promise<boolean>;
-  transition?(
-    id: string,
-    from: ExecutionState,
-    to: ExecutionState,
-    data?: string,
-  ): Promise<boolean>;
+
+export interface VerifiedHostAuthorization {
+  /** base64 canonical wire transaction, as decoded here */
+  transaction: string;
+  envelope: AuthorizationEnvelope;
+  replayStore: ReplayStore;
 }
-export class InMemoryReplayStore implements ReplayStore {
-  readonly states = new Map<string, ExecutionState>();
-  async consume(id: string) {
-    if (this.states.has(id)) return false;
-    this.states.set(id, "claimed");
-    return true;
-  }
-  async transition(id: string, from: ExecutionState, to: ExecutionState) {
-    if (this.states.get(id) !== from) return false;
-    this.states.set(id, to);
-    return true;
-  }
-}
-export class SignerWireVerifier {
+
+/**
+ * Host-side gate in front of the signer.
+ *
+ * The envelope checks themselves are the signer's own {@link SignerWireVerifier}
+ * — deliberately the same code, so the host cannot accidentally be laxer than
+ * custody. What this class adds is the two things only the host can do: burn
+ * the one-time authorization id in the host's replay store, and fence the
+ * recent blockhash against the cluster's current height.
+ *
+ * Blockhash expiry is TERMINAL. The authorization is burned and marked
+ * `expired`; nothing re-signs it under a fresh blockhash, because a fresh
+ * blockhash is different message bytes, a different message hash, and therefore
+ * requires a brand-new operator decision.
+ */
+export class HostAuthorizationVerifier {
   constructor(
     private readonly dependencies: {
       verifier: EnvelopeVerifier;
       replayStore: ReplayStore;
-      now?: () => number;
       audience: string;
+      cluster?: string;
+      now?: () => number;
       signerKeyId?: string;
       authorizationKeyIds?: readonly string[];
       policyHash?: string;
       policyVersion?: number;
-      nonce?: (chainId: number, account: string) => Promise<number>;
+      maxTtlMs?: number;
+      blockHeight?: () => Promise<number>;
     },
   ) {}
-  async verify(serialized: `0x${string}`, envelope: AuthorizationEnvelope) {
-    const c = envelope.claims,
-      now = (this.dependencies.now ?? Date.now)();
-    if (c.protocol !== "robinhood-execution-authorization" || c.version !== 1)
-      throw Error("envelope_version_invalid");
-    if (c.issuedAt > now) throw Error("envelope_issued_in_future");
-    if (now >= c.expiresAt || c.expiresAt - c.issuedAt > 60_000)
-      throw Error("envelope_expired");
-    if (c.audience !== this.dependencies.audience)
-      throw Error("envelope_audience_mismatch");
-    if (
-      this.dependencies.signerKeyId &&
-      c.signerKeyId !== this.dependencies.signerKeyId
-    )
-      throw Error("envelope_signer_mismatch");
-    if (
-      (this.dependencies.policyHash &&
-        c.policyHash.toLowerCase() !==
-          this.dependencies.policyHash.toLowerCase()) ||
-      (this.dependencies.policyVersion !== undefined &&
-        c.policyVersion !== this.dependencies.policyVersion)
-    )
-      throw Error("envelope_policy_mismatch");
-    if (
-      (this.dependencies.authorizationKeyIds && !c.signerKeyId) ||
-      (this.dependencies.authorizationKeyIds &&
-        c.signerKeyId &&
-        !this.dependencies.authorizationKeyIds.includes(c.signerKeyId))
-    )
-      throw Error("envelope_authorization_key_unknown");
-    if (
-      !(await this.dependencies.verifier.verify(
-        canonicalClaims(c),
-        envelope.signature,
-        c.signerKeyId,
-      ))
-    )
-      throw Error("envelope_signature_invalid");
-    let d: any;
-    try {
-      d = parseTransaction(serialized);
-    } catch {
-      throw Error("envelope_transaction_invalid");
-    }
-    const eq = (a: unknown, b: unknown) =>
-      JSON.stringify(normalize(a)) === JSON.stringify(normalize(b));
-    if (
-      serialized.toLowerCase() !== c.serialized.toLowerCase() ||
-      keccak256(serialized).toLowerCase() !== c.transactionHash.toLowerCase() ||
-      d.chainId !== c.chainId ||
-      d.nonce !== c.nonce ||
-      d.to?.toLowerCase() !== c.to.toLowerCase() ||
-      (d.data ?? "0x").toLowerCase() !== c.data.toLowerCase() ||
-      String(d.value ?? 0) !== c.value ||
-      String(d.gas ?? 0) !== c.gas ||
-      d.type !== c.type ||
-      !eq(d.accessList ?? [], c.accessList) ||
-      String(d.gasPrice ?? "") !== (c.gasPrice ?? "") ||
-      String(d.maxFeePerGas ?? "") !== (c.maxFeePerGas ?? "") ||
-      String(d.maxPriorityFeePerGas ?? "") !== (c.maxPriorityFeePerGas ?? "")
-    )
-      throw Error("envelope_transaction_mismatch");
-    if (
-      this.dependencies.nonce &&
-      (await this.dependencies.nonce(c.chainId, c.account)) !== c.nonce
-    )
-      throw Error("envelope_nonce_changed");
-    if (!(await this.dependencies.replayStore.consume(c.id, c.expiresAt)))
+  async verify(
+    transaction: string,
+    envelope: AuthorizationEnvelope,
+  ): Promise<VerifiedHostAuthorization> {
+    const d = this.dependencies,
+      verified = await new SignerWireVerifier(d).verify(transaction, envelope),
+      claims = envelope.claims;
+    if (!(await d.replayStore.consume(claims.id, claims.expiresAt)))
       throw Error("envelope_replayed");
+    if (d.blockHeight) {
+      const height = await d.blockHeight();
+      if (!Number.isSafeInteger(height) || height < 0)
+        throw Error("block_height_invalid");
+      if (height > claims.lastValidBlockHeight) {
+        await d.replayStore.transition?.(
+          claims.id,
+          "claimed",
+          "expired",
+          JSON.stringify({
+            lastValidBlockHeight: claims.lastValidBlockHeight,
+            blockHeight: height,
+          }),
+        );
+        throw Error("envelope_blockhash_expired");
+      }
+    }
     return {
-      serialized,
+      transaction: verified.decoded.wireBase64,
       envelope,
-      decoded: d,
-      replayStore: this.dependencies.replayStore,
+      replayStore: d.replayStore,
     };
   }
 }

@@ -2,7 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 import { ToolRegistry } from "../src/agent/tools/registry.js";
 import { registerTradingTools } from "../src/live-trading/tools.js";
 import { TRADING_CAPABILITIES } from "../src/agent/types.js";
-const A = "0x0000000000000000000000000000000000000001";
+import { pubkey } from "./signer-fixtures.js";
+const A = pubkey(1);
 describe("typed trading agent tools", () => {
   it("exposes typed intents without target or calldata", async () => {
     const trading = {
@@ -18,15 +19,16 @@ describe("typed trading agent tools", () => {
       ],
     });
     const buy = schema.find((x) => x.name === "trade.buy")!;
-    expect(buy.inputSchema).not.toHaveProperty("properties.target");
-    expect(buy.inputSchema).not.toHaveProperty("properties.calldata");
+    expect(buy.inputSchema).not.toHaveProperty("properties.program");
+    expect(buy.inputSchema).not.toHaveProperty("properties.instructions");
+    expect(buy.inputSchema).not.toHaveProperty("properties.transaction");
     expect(
       (
         await r.invoke(
           "trade.buy",
           {
-            tokenIn: A,
-            tokenOut: A,
+            inputMint: A,
+            outputMint: A,
             amountIn: "10",
             slippageBps: 10,
             dryRun: true,

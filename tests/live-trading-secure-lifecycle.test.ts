@@ -2,8 +2,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { encodeFunctionData, keccak256 } from "viem";
-import { ERC20_ABI } from "../src/trading/index.js";
+import { PublicKey, TransactionInstruction } from "@solana/web3.js";
+import {
+  attachSignature,
+  decodeTransaction,
+} from "../src/signer/transaction.js";
 import {
   buildSimulationRequest,
   createSimulationEvidence,
@@ -13,7 +16,23 @@ import {
   TradingOrchestrator,
   type TradingRpc,
 } from "../src/live-trading/index.js";
+import type { SignerSignResponse } from "../src/execution/authorization/wire.js";
 import { removeDir } from "./helpers.js";
+import {
+  buildTransaction,
+  CLUSTER,
+  pubkey,
+  systemTransfer,
+  TOKEN_PROGRAM,
+} from "./signer-fixtures.js";
+import {
+  FEE_PAYER,
+  LAST_VALID_BLOCK_HEIGHT,
+  MINT,
+  okResult,
+  prepared,
+} from "./execution-fixtures.js";
+
 const dirs: string[] = [];
 const temp = () => {
   const d = mkdtempSync(join(tmpdir(), "secure-trade-"));
@@ -21,50 +40,67 @@ const temp = () => {
   return d;
 };
 afterEach(() => dirs.splice(0).forEach((d) => removeDir(d)));
-const account = "0x0000000000000000000000000000000000000001" as const,
-  router = "0x0000000000000000000000000000000000000002" as const,
-  token = "0x0000000000000000000000000000000000000003" as const;
-function fixture(db: string) {
-  const tx = {
-    chainId: 46630,
-    from: account,
-    to: router,
-    data: "0x12345678" as const,
-    value: 0n,
-    gas: 100000n,
-    nonce: 7,
-    type: "eip1559" as const,
-    maxFeePerGas: 20n,
-    maxPriorityFeePerGas: 2n,
-    accessList: [],
-  };
-  const request = buildSimulationRequest(tx, "policy-hash");
-  const evidence = createSimulationEvidence(request, {
-    success: true,
-    blockNumber: 10n,
-    blockHash: `0x${"11".repeat(32)}`,
-    transactionHash: request.transactionHash,
-    gasUsed: 90000n,
-    stateDiffs: [],
-    events: [],
-    assetDeltas: [],
+
+const OUT = pubkey(4);
+const TOKEN_ACCOUNT = pubkey(5);
+const POLICY_HASH = "policy-hash";
+
+/** SPL Token `Revoke` — tag 5, clears the delegate on a token account. */
+function tokenRevoke(source: string, owner: string) {
+  return new TransactionInstruction({
+    programId: new PublicKey(TOKEN_PROGRAM),
+    keys: [
+      { pubkey: new PublicKey(source), isSigner: false, isWritable: true },
+      { pubkey: new PublicKey(owner), isSigner: true, isWritable: false },
+    ],
+    data: Buffer.from([5]),
   });
+}
+
+const sign = (transaction: string, byte = 1) =>
+  attachSignature(
+    decodeTransaction(transaction),
+    new Uint8Array(64).fill(byte),
+  );
+
+function exact(transaction: string) {
+  const request = buildSimulationRequest(
+    prepared({ transaction }),
+    POLICY_HASH,
+  );
+  return {
+    request,
+    evidence: createSimulationEvidence(request, okResult(request)),
+    signed: sign(transaction),
+  };
+}
+
+function fixture(db: string, overrides: Record<string, unknown> = {}) {
+  const swap = exact(
+    buildTransaction({
+      payer: FEE_PAYER,
+      instructions: [systemTransfer(FEE_PAYER, OUT, 1_000n)],
+    }),
+  );
   const rpc: TradingRpc = {
     balance: vi.fn(async () => 0n),
     quote: vi.fn(async () => ({
       amountOut: 90n,
-      blockNumber: 10n,
+      slot: 10n,
+      lastValidBlockHeight: LAST_VALID_BLOCK_HEIGHT,
       expiresAt: 20_000,
-      request,
-      evidence,
+      request: swap.request,
+      evidence: swap.evidence,
     })),
-    simulate: vi.fn(async () => evidence),
-    broadcast: vi.fn(async (raw) => keccak256(raw)),
-    receipt: vi.fn(async () => null),
-    blockHash: vi.fn(async () => evidence.blockHash as `0x${string}`),
+    simulate: vi.fn(async () => swap.evidence),
+    broadcast: vi.fn(
+      async (wire: string) => decodeTransaction(wire).signatures[0]!,
+    ),
+    status: vi.fn(async () => null),
+    blockHeight: vi.fn(async () => LAST_VALID_BLOCK_HEIGHT - 100),
   };
   const approvals = {
-    request: vi.fn((x: any) => ({
+    request: vi.fn((x: Record<string, unknown>) => ({
       ...x,
       status: "pending",
       revision: 0,
@@ -78,39 +114,40 @@ function fixture(db: string) {
     decide: vi.fn(),
     consume: vi.fn(),
   };
-  const envelope = { claims: { id: "auth-1" }, signature: "sig" } as any;
+  const envelope = { claims: { id: "auth-1" }, signature: "sig" };
   const issuer = { issue: vi.fn(async () => envelope) };
   const signer = {
-    sign: vi.fn(async () => `0x${"aa".repeat(100)}` as `0x${string}`),
+    sign: vi.fn(async (): Promise<SignerSignResponse> => swap.signed),
+  };
+  const reservations = {
+    reserve: async () => "reservation-1",
+    valid: async () => true,
+    commit: vi.fn(async () => true),
+    release: vi.fn(async () => true),
   };
   const store = new ExecutionStore(db);
   const orchestrator = new TradingOrchestrator({
-    chainId: 46630,
-    account,
-    router,
+    cluster: CLUSTER,
+    account: FEE_PAYER,
     liveEnabled: true,
     policy: {
       version: 1,
-      hash: "policy-hash",
+      hash: POLICY_HASH,
       maxAmountIn: 100n,
       maxSlippageBps: 100,
       approvalRequired: true,
-      finalityBlocks: 2,
+      finalityCommitment: "finalized",
     },
     rpc,
     store,
     signer,
-    approvalEngine: approvals as any,
-    authorizationIssuer: issuer as any,
+    approvalEngine: approvals as never,
+    authorizationIssuer: issuer as never,
     risk: { assess: async () => ({ hash: "risk-hash", allowed: true }) },
-    reservations: {
-      reserve: async () => "reservation-1",
-      valid: async () => true,
-      commit: async () => true,
-      release: async () => true,
-    },
+    reservations,
     clock: () => 1000,
     audience: "daemon",
+    ...overrides,
   });
   return {
     store,
@@ -119,28 +156,31 @@ function fixture(db: string) {
     approvals,
     issuer,
     signer,
-    request,
-    evidence,
+    reservations,
     envelope,
+    ...swap,
   };
 }
+
+const buy = (o: TradingOrchestrator) =>
+  o.quote({
+    side: "buy",
+    inputMint: MINT,
+    outputMint: OUT,
+    amountIn: 10n,
+    slippageBps: 50,
+  });
+
 describe("exact authorized trading lifecycle", () => {
-  it("durably stores exact unsigned transaction and rejects approval substitution", async () => {
+  it("durably stores the exact unsigned transaction and rejects substitution", async () => {
     const db = join(temp(), "trade.sqlite");
     let f = fixture(db);
-    const q = await f.orchestrator.quote({
-      side: "buy",
-      tokenIn: token,
-      tokenOut: router,
-      amountIn: 10n,
-      slippageBps: 50,
-    });
-    expect(q.serialized).toBe(f.request.serialized);
+    const q = await buy(f.orchestrator);
+    expect(q.transaction).toBe(f.request.transaction);
     f.store.close();
+    // The exact bytes must survive a restart, not be rebuilt from a quote.
     f = fixture(db);
-    expect(f.store.getQuote(q.id)?.transactionHash).toBe(
-      f.request.transactionHash,
-    );
+    expect(f.store.getQuote(q.id)?.messageHash).toBe(f.request.messageHash);
     const x = await f.orchestrator.execute(q.id, {
       idempotencyKey: "once",
       actor: "agent",
@@ -148,33 +188,35 @@ describe("exact authorized trading lifecycle", () => {
     });
     expect(f.approvals.request).toHaveBeenCalledWith(
       expect.objectContaining({
-        serializedTransaction: expect.objectContaining({
-          serialized: f.request.serialized,
-        }),
+        chain: CLUSTER,
+        account: FEE_PAYER,
         simulationHash: f.evidence.hash,
-        nonce: "7",
-        calldata: "0x12345678",
+        nonce: f.request.recentBlockhash,
+        calldata: f.request.message,
+        serializedTransaction: expect.objectContaining({
+          messageHash: f.request.messageHash,
+          transaction: f.request.transaction,
+        }),
       }),
       expect.anything(),
     );
-    const mutated = {
-      ...f.request,
-      serialized: (f.request.serialized.slice(0, -2) + "00") as `0x${string}`,
-    };
-    expect(() => f.orchestrator.assertExact(x.id, mutated)).toThrow(
-      /exact transaction mismatch/,
-    );
+    expect(() =>
+      f.orchestrator.assertExact(x.id, {
+        ...f.request,
+        transaction: exact(
+          buildTransaction({
+            payer: FEE_PAYER,
+            instructions: [systemTransfer(FEE_PAYER, OUT, 2_000n)],
+          }),
+        ).request.transaction,
+      }),
+    ).toThrow(/exact transaction mismatch/);
     f.store.close();
   });
-  it("issues an envelope, sends exact serialized+envelope+token, and fences duplicate submit", async () => {
+
+  it("issues an envelope, sends exactly {transaction, envelope}, and fences duplicate submit", async () => {
     const f = fixture(join(temp(), "trade.sqlite"));
-    const q = await f.orchestrator.quote({
-      side: "buy",
-      tokenIn: token,
-      tokenOut: router,
-      amountIn: 10n,
-      slippageBps: 50,
-    });
+    const q = await buy(f.orchestrator);
     const x = await f.orchestrator.execute(q.id, {
       idempotencyKey: "once",
       actor: "agent",
@@ -188,148 +230,209 @@ describe("exact authorized trading lifecycle", () => {
       expect.objectContaining({
         approvalId: x.approvalId,
         reservationId: "reservation-1",
+        audience: "daemon",
+        policyVersion: 1,
       }),
     );
+    // The wire shape the daemon actually speaks — not `{serialized}`.
     expect(f.signer.sign).toHaveBeenCalledWith({
-      serialized: f.request.serialized,
+      transaction: f.request.transaction,
       envelope: f.envelope,
-      authorizationToken: "auth-1",
     });
     expect(sent.state).toBe("broadcast");
+    expect(sent.signature).toBe(f.signed.signature);
+    expect(sent.messageHash).toBe(f.request.messageHash);
+    expect(f.reservations.commit).toHaveBeenCalledWith("reservation-1");
     await expect(f.orchestrator.submit(x.id)).rejects.toThrow(
       /not approved|in progress/,
     );
+    expect(f.signer.sign).toHaveBeenCalledTimes(1);
     f.store.close();
   });
-  it("runs an allowance revoke through the full approval and signing pipeline", async () => {
+
+  it("burns the execution when the blockhash dies, and never asks for a signature", async () => {
     const f = fixture(join(temp(), "trade.sqlite"));
-    const data = encodeFunctionData({
-      abi: ERC20_ABI,
-      functionName: "approve",
-      args: [router, 0n],
+    const q = await buy(f.orchestrator);
+    const x = await f.orchestrator.execute(q.id, {
+      idempotencyKey: "once",
+      actor: "agent",
+      dryRun: false,
     });
-    const tx = {
-      chainId: 46630,
-      from: account,
-      to: token,
-      data,
-      value: 0n,
-      gas: 60000n,
-      nonce: 7,
-      type: "eip1559" as const,
-      maxFeePerGas: 20n,
-      maxPriorityFeePerGas: 2n,
-      accessList: [],
-    };
-    const request = buildSimulationRequest(tx, "policy-hash");
-    const evidence = createSimulationEvidence(request, {
-      success: true,
-      blockNumber: 10n,
-      blockHash: `0x${"11".repeat(32)}`,
-      transactionHash: request.transactionHash,
-      gasUsed: 50000n,
-      stateDiffs: [],
-      events: [],
-      assetDeltas: [],
+    await f.orchestrator.refreshApproval(x.id);
+    vi.mocked(f.rpc.blockHeight).mockResolvedValue(LAST_VALID_BLOCK_HEIGHT + 1);
+    await expect(f.orchestrator.submit(x.id)).rejects.toThrow(
+      "blockhash_expired",
+    );
+    // Terminal. A fresh blockhash is different bytes and needs a new decision.
+    expect(f.store.get(x.id)?.state).toBe("expired");
+    expect(f.reservations.release).toHaveBeenCalledWith("reservation-1");
+    expect(f.signer.sign).not.toHaveBeenCalled();
+    expect(f.issuer.issue).not.toHaveBeenCalled();
+    await expect(f.orchestrator.submit(x.id)).rejects.toThrow("not approved");
+    f.store.close();
+  });
+
+  it("refuses to queue an approval for a transaction that can no longer land", async () => {
+    const f = fixture(join(temp(), "trade.sqlite"));
+    const q = await buy(f.orchestrator);
+    vi.mocked(f.rpc.blockHeight).mockResolvedValue(LAST_VALID_BLOCK_HEIGHT + 1);
+    await expect(
+      f.orchestrator.execute(q.id, {
+        idempotencyKey: "once",
+        actor: "agent",
+        dryRun: false,
+      }),
+    ).rejects.toThrow("blockhash_expired");
+    expect(f.approvals.request).not.toHaveBeenCalled();
+    f.store.close();
+  });
+
+  it("rejects a signer whose bytes do not carry the signature it reported", async () => {
+    const f = fixture(join(temp(), "trade.sqlite"));
+    f.signer.sign.mockResolvedValue({
+      transaction: f.signed.transaction,
+      signature: sign(f.request.transaction, 2).signature,
     });
+    const q = await buy(f.orchestrator);
+    const x = await f.orchestrator.execute(q.id, {
+      idempotencyKey: "once",
+      actor: "agent",
+      dryRun: false,
+    });
+    await f.orchestrator.refreshApproval(x.id);
+    await expect(f.orchestrator.submit(x.id)).rejects.toThrow(
+      "invalid_signer_response",
+    );
+    expect(f.rpc.broadcast).not.toHaveBeenCalled();
+    expect(f.store.get(x.id)?.state).toBe("signing");
+    f.store.close();
+  });
+
+  it("moves a mismatched broadcast answer to reconciliation with the signature kept", async () => {
+    const f = fixture(join(temp(), "trade.sqlite"));
+    vi.mocked(f.rpc.broadcast).mockResolvedValue("some-other-signature");
+    const q = await buy(f.orchestrator);
+    const x = await f.orchestrator.execute(q.id, {
+      idempotencyKey: "once",
+      actor: "agent",
+      dryRun: false,
+    });
+    await f.orchestrator.refreshApproval(x.id);
+    await expect(f.orchestrator.submit(x.id)).rejects.toThrow(
+      "broadcast_signature_mismatch",
+    );
+    const row = f.store.get(x.id)!;
+    expect(row.state).toBe("reconciliation-required");
+    // The signature was durable before the broadcast, so a reconciler can
+    // still find out whether the transaction landed.
+    expect(row.signature).toBe(f.signed.signature);
+    expect(f.reservations.commit).not.toHaveBeenCalled();
+    f.store.close();
+  });
+
+  it("accepts a signature the daemon broadcast itself", async () => {
+    const f = fixture(join(temp(), "trade.sqlite"));
+    f.signer.sign.mockResolvedValue({
+      ...f.signed,
+      broadcast: f.signed.signature,
+    });
+    const q = await buy(f.orchestrator);
+    const x = await f.orchestrator.execute(q.id, {
+      idempotencyKey: "once",
+      actor: "agent",
+      dryRun: false,
+    });
+    await f.orchestrator.refreshApproval(x.id);
+    expect((await f.orchestrator.submit(x.id)).state).toBe("broadcast");
+    expect(f.rpc.broadcast).not.toHaveBeenCalled();
+    f.store.close();
+  });
+
+  it("runs an SPL Token revoke through the full approval and signing pipeline", async () => {
+    const f = fixture(join(temp(), "trade.sqlite"));
+    const revoke = exact(
+      buildTransaction({
+        payer: FEE_PAYER,
+        instructions: [tokenRevoke(TOKEN_ACCOUNT, FEE_PAYER)],
+      }),
+    );
     f.rpc.revokeQuote = vi.fn(async () => ({
       amountOut: 0n,
-      blockNumber: 10n,
-      blockHash: `0x${"11".repeat(32)}` as `0x${string}`,
+      slot: 10n,
+      lastValidBlockHeight: LAST_VALID_BLOCK_HEIGHT,
       expiresAt: 20_000,
-      request,
-      evidence,
+      request: revoke.request,
+      evidence: revoke.evidence,
     }));
-    vi.mocked(f.rpc.simulate).mockResolvedValue(evidence);
-    const x = await f.orchestrator.revoke(token, {
+    vi.mocked(f.rpc.simulate).mockResolvedValue(revoke.evidence);
+    f.signer.sign.mockResolvedValue(revoke.signed);
+    const x = await f.orchestrator.revoke(TOKEN_ACCOUNT, {
       idempotencyKey: "revoke-1",
       actor: "operator",
       dryRun: false,
     });
     expect(x.state).toBe("awaiting-approval");
     expect(f.rpc.revokeQuote).toHaveBeenCalledWith({
-      token,
-      spender: router,
+      tokenAccount: TOKEN_ACCOUNT,
+      owner: FEE_PAYER,
     });
     expect(f.approvals.request).toHaveBeenCalledWith(
       expect.objectContaining({
-        calldata: data,
-        router: token,
+        router: TOKEN_PROGRAM,
         value: "0",
-        serializedTransaction: expect.objectContaining({
-          serialized: request.serialized,
-        }),
+        calldata: revoke.request.message,
       }),
       expect.anything(),
     );
-    const again = await f.orchestrator.revoke(token, {
-      idempotencyKey: "revoke-1",
-      actor: "operator",
-      dryRun: false,
-    });
-    expect(again.id).toBe(x.id);
+    // Idempotent: the same key returns the same execution, not a second one.
+    expect(
+      (
+        await f.orchestrator.revoke(TOKEN_ACCOUNT, {
+          idempotencyKey: "revoke-1",
+          actor: "operator",
+          dryRun: false,
+        })
+      ).id,
+    ).toBe(x.id);
     await f.orchestrator.refreshApproval(x.id);
-    const sent = await f.orchestrator.submit(x.id);
-    expect(sent.state).toBe("broadcast");
+    expect((await f.orchestrator.submit(x.id)).state).toBe("broadcast");
     expect(f.signer.sign).toHaveBeenCalledWith({
-      serialized: request.serialized,
+      transaction: revoke.request.transaction,
       envelope: f.envelope,
-      authorizationToken: "auth-1",
     });
     f.store.close();
   });
+
   it("defaults revokes to dry-run and fails closed without revoke support", async () => {
     const f = fixture(join(temp(), "trade.sqlite"));
     await expect(
-      f.orchestrator.revoke(token, { idempotencyKey: "r", actor: "operator" }),
+      f.orchestrator.revoke(TOKEN_ACCOUNT, {
+        idempotencyKey: "r",
+        actor: "operator",
+      }),
     ).rejects.toThrow("revoke_unsupported");
-    const data = encodeFunctionData({
-      abi: ERC20_ABI,
-      functionName: "approve",
-      args: [router, 0n],
-    });
-    const request = buildSimulationRequest(
-      {
-        chainId: 46630,
-        from: account,
-        to: token,
-        data,
-        value: 0n,
-        gas: 60000n,
-        nonce: 7,
-        type: "eip1559",
-        maxFeePerGas: 20n,
-        maxPriorityFeePerGas: 2n,
-        accessList: [],
-      },
-      "policy-hash",
+    const revoke = exact(
+      buildTransaction({
+        payer: FEE_PAYER,
+        instructions: [tokenRevoke(TOKEN_ACCOUNT, FEE_PAYER)],
+      }),
     );
-    const evidence = createSimulationEvidence(request, {
-      success: true,
-      blockNumber: 10n,
-      blockHash: `0x${"11".repeat(32)}`,
-      transactionHash: request.transactionHash,
-      gasUsed: 50000n,
-      stateDiffs: [],
-      events: [],
-      assetDeltas: [],
-    });
     f.rpc.revokeQuote = vi.fn(async () => ({
       amountOut: 0n,
-      blockNumber: 10n,
-      blockHash: `0x${"11".repeat(32)}` as `0x${string}`,
+      slot: 10n,
+      lastValidBlockHeight: LAST_VALID_BLOCK_HEIGHT,
       expiresAt: 20_000,
-      request,
-      evidence,
+      request: revoke.request,
+      evidence: revoke.evidence,
     }));
-    vi.mocked(f.rpc.simulate).mockResolvedValue(evidence);
+    vi.mocked(f.rpc.simulate).mockResolvedValue(revoke.evidence);
     await expect(
-      f.orchestrator.revoke("not-an-address" as any, {
+      f.orchestrator.revoke("not-a-pubkey", {
         idempotencyKey: "bad",
         actor: "operator",
       }),
-    ).rejects.toThrow();
-    const dry = await f.orchestrator.revoke(token, {
+    ).rejects.toThrow(/tokenAccount/);
+    const dry = await f.orchestrator.revoke(TOKEN_ACCOUNT, {
       idempotencyKey: "dry",
       actor: "operator",
     });
@@ -337,27 +440,44 @@ describe("exact authorized trading lifecycle", () => {
     expect(dry.dryRun).toBe(true);
     f.store.close();
   });
-  it("persists only the signed transaction hash in the API execution database", async () => {
+
+  it("persists only the signature, never the signed bytes", async () => {
     const db = join(temp(), "trade.sqlite"),
       f = fixture(db);
-    const q = await f.orchestrator.quote({
-      side: "buy",
-      tokenIn: token,
-      tokenOut: router,
-      amountIn: 10n,
-      slippageBps: 50,
-    });
+    const q = await buy(f.orchestrator);
     const x = await f.orchestrator.execute(q.id, {
-      idempotencyKey: "hash-only",
+      idempotencyKey: "signature-only",
       actor: "agent",
       dryRun: false,
     });
     await f.orchestrator.refreshApproval(x.id);
     await f.orchestrator.submit(x.id);
     const persisted = f.store.get(x.id)!;
-    expect(persisted.rawTransactionHash).toMatch(/^0x/);
-    expect(persisted).not.toHaveProperty("rawTransaction");
-    expect(readFileSync(db)).not.toContain(Buffer.from("aa".repeat(100)));
+    expect(persisted.signature).toBe(f.signed.signature);
+    expect(persisted.messageHash).toBe(f.request.messageHash);
+    expect(persisted).not.toHaveProperty("signedTransaction");
+    // The only copy of the signed bytes lives inside the signer's own store.
+    expect(readFileSync(db, "utf8")).not.toContain(f.signed.transaction);
+    f.store.close();
+  });
+
+  it("rejects evidence that describes a different message", async () => {
+    const f = fixture(join(temp(), "trade.sqlite"));
+    const other = exact(
+      buildTransaction({
+        payer: FEE_PAYER,
+        instructions: [systemTransfer(FEE_PAYER, OUT, 7_000n)],
+      }),
+    );
+    vi.mocked(f.rpc.simulate).mockResolvedValue(other.evidence);
+    const q = await buy(f.orchestrator);
+    await expect(
+      f.orchestrator.execute(q.id, {
+        idempotencyKey: "once",
+        actor: "agent",
+        dryRun: false,
+      }),
+    ).rejects.toThrow("simulation_transaction_mismatch");
     f.store.close();
   });
 });

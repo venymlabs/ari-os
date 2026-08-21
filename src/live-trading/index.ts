@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { createConnection } from "node:net";
 import { toIpcPath } from "../platform.js";
-import { getAddress, keccak256, type Address, type Hex } from "viem";
+import { isPublicKey, signatureOf } from "../signer/transaction.js";
 import type {
   SimulationEvidence,
   SimulationRequest,
@@ -11,10 +11,15 @@ import type {
   ApprovalEngine,
   DecisionInput,
 } from "../execution/approvals/index.js";
+import type { AuthorizationIssuer } from "../execution/authorization/index.js";
 import type {
   AuthorizationEnvelope,
-  AuthorizationIssuer,
-} from "../execution/authorization/index.js";
+  IsolatedSigner,
+  SignerResultResponse,
+  SignerSignResponse,
+  SignerStatusResponse,
+} from "../execution/authorization/wire.js";
+
 const json = (x: unknown) =>
   JSON.stringify(x, (_k, v) =>
     typeof v === "bigint" ? { $bigint: v.toString() } : v,
@@ -25,8 +30,21 @@ const parse = (x: string) =>
   );
 const digest = (x: unknown) =>
   createHash("sha256").update(json(x)).digest("hex");
+
 export type TradeSide = "buy" | "sell";
 export type QuoteSide = TradeSide | "revoke";
+
+/**
+ * Durable execution lifecycle.
+ *
+ * `expired` and `dropped` are the two Solana terminal states and neither is
+ * retryable. `expired`: the recent blockhash died before a signature existed.
+ * `dropped`: a signature existed and was broadcast, but the cluster never saw
+ * it and its blockhash is now past `lastValidBlockHeight`. In both cases the
+ * only way forward is a fresh quote, a fresh simulation and a fresh operator
+ * decision — never a re-sign, because a new blockhash is new message bytes and
+ * a signature over the old ones may still land.
+ */
 export type TradeState =
   | "awaiting-approval"
   | "approved"
@@ -39,82 +57,92 @@ export type TradeState =
   | "finalized"
   | "failed"
   | "denied"
-  | "dropped"
-  | "reorged";
+  | "expired"
+  | "dropped";
+
+export type Commitment = "processed" | "confirmed" | "finalized";
+
 export interface TradingPolicy {
   version: number;
   hash?: string;
+  /** cap on the input leg, in base units of the mint leaving the wallet */
   maxAmountIn: bigint;
   maxSlippageBps: number;
   approvalRequired: boolean;
-  finalityBlocks: number;
-  allowedTokens?: readonly Address[];
+  /**
+   * Commitment at which an execution is considered final. Solana has no
+   * confirmation depth to count; `confirmed` is supermajority vote and
+   * `finalized` is rooted.
+   */
+  finalityCommitment: Commitment;
+  /** base58 mints this account may trade */
+  allowedMints?: readonly string[];
 }
+
 export interface QuoteResult {
   amountOut: bigint;
-  blockNumber: bigint;
-  blockHash?: Hex;
+  /** context slot the quote was produced at */
+  slot: bigint;
+  /** block height past which the built transaction's blockhash cannot land */
+  lastValidBlockHeight: number;
   expiresAt: number;
   request?: SimulationRequest;
   evidence?: SimulationEvidence;
   route?: unknown;
 }
+
+export interface SignatureStatus {
+  slot: bigint;
+  confirmationStatus: Commitment;
+  err: unknown;
+}
+
 export interface TradingRpc {
-  balance(owner: Address, token?: Address): Promise<bigint>;
+  balance(owner: string, mint?: string): Promise<bigint>;
   quote(x: {
     side: TradeSide;
-    tokenIn: Address;
-    tokenOut: Address;
+    inputMint: string;
+    outputMint: string;
     amountIn: bigint;
   }): Promise<QuoteResult>;
-  /** Build and simulate the exact approve(spender, 0) transaction. */
-  revokeQuote?(x: { token: Address; spender: Address }): Promise<QuoteResult>;
+  /**
+   * Build and simulate the exact SPL Token `Revoke` that clears the delegate on
+   * a token account. This is the Solana analogue of revoking an ERC-20
+   * allowance: it is the one instruction that can only ever reduce what someone
+   * else may move.
+   */
+  revokeQuote?(x: {
+    tokenAccount: string;
+    owner: string;
+  }): Promise<QuoteResult>;
   simulate(
     x: SimulationRequest | Record<string, unknown>,
   ): Promise<
     | SimulationEvidence
-    | { success: boolean; blockNumber: bigint; simulationHash: string }
+    | { success: boolean; slot: bigint; simulationHash: string }
   >;
-  broadcast(raw: Hex): Promise<Hex>;
-  receipt(hash: Hex): Promise<{
-    blockNumber: bigint;
-    blockHash: Hex;
-    status: "success" | "reverted";
-    confirmations: number;
-  } | null>;
-  blockHash(n: bigint): Promise<Hex | null>;
+  /** Submit base64 signed wire bytes; returns the base58 signature. */
+  broadcast(wire: string): Promise<string>;
+  status(signature: string): Promise<SignatureStatus | null>;
+  /** Current cluster block height — the blockhash-expiry fence. */
+  blockHeight(): Promise<number>;
 }
-export interface IsolatedSigner {
-  sign(request: {
-    serialized: Hex;
-    envelope: AuthorizationEnvelope;
-    authorizationToken: string;
-  }): Promise<{ raw: Hex; hash: Hex } | Hex>;
-  result?(request: {
-    authorizationId: string;
-    transactionHash: Hex;
-    recoverRaw?: boolean;
-  }): Promise<{ state: string; hash?: Hex; raw?: Hex }>;
-}
-export interface SignerStatus {
-  account: Address;
-  chainIds: number[];
-  policyHash: string;
-  policyVersion: number;
-  authorizationKeyId: string;
-  serviceVersion: string;
-}
+
+export type { IsolatedSigner };
+export type SignerStatus = SignerStatusResponse;
+
 type Quote = {
   id: string;
   side: QuoteSide;
-  tokenIn: Address;
-  tokenOut: Address;
+  cluster: string;
+  inputMint: string;
+  outputMint: string;
   amountIn: bigint;
   amountOut: bigint;
   minimumOut: bigint;
   slippageBps: number;
-  blockNumber: bigint;
-  blockHash?: Hex;
+  slot: bigint;
+  lastValidBlockHeight: number;
   expiresAt: number;
   intentHash: string;
   quoteHash: string;
@@ -122,9 +150,11 @@ type Quote = {
   route?: unknown;
   request?: SimulationRequest;
   evidence?: SimulationEvidence;
-  serialized?: Hex;
-  transactionHash?: Hex;
+  /** base64 unsigned wire transaction */
+  transaction?: string;
+  messageHash?: string;
 };
+
 export type Execution = {
   id: string;
   version: number;
@@ -142,13 +172,16 @@ export type Execution = {
   idempotencyKey: string;
   state: TradeState;
   approver?: string;
-  rawTransactionHash?: Hex;
-  txHash?: Hex;
-  blockNumber?: bigint;
-  blockHash?: Hex;
+  /** `0x` sha256 of the message bytes that were signed */
+  messageHash?: string;
+  /** base58 transaction signature */
+  signature?: string;
+  slot?: bigint;
+  lastValidBlockHeight?: number;
   createdAt: number;
   updatedAt: number;
 };
+
 export class ExecutionStore {
   private db: DatabaseSync;
   constructor(path: string) {
@@ -160,24 +193,24 @@ export class ExecutionStore {
     // in place; the JSON payload remains the source of truth.
     const executionColumns = this.db
       .prepare("PRAGMA table_info(executions)")
-      .all() as any[];
+      .all() as { name?: string }[];
     if (!executionColumns.some((c) => c.name === "state")) {
       this.db.exec("ALTER TABLE executions ADD COLUMN state TEXT");
       for (const row of this.db
         .prepare("SELECT id,payload FROM executions")
-        .all() as any[])
+        .all() as { id: string; payload: string }[])
         this.db
           .prepare("UPDATE executions SET state=? WHERE id=?")
           .run((parse(String(row.payload)) as Execution).state, row.id);
     }
-    const quoteColumns = this.db
-      .prepare("PRAGMA table_info(quotes)")
-      .all() as any[];
+    const quoteColumns = this.db.prepare("PRAGMA table_info(quotes)").all() as {
+      name?: string;
+    }[];
     if (!quoteColumns.some((c) => c.name === "quote_hash")) {
       this.db.exec("ALTER TABLE quotes ADD COLUMN quote_hash TEXT");
       for (const row of this.db
         .prepare("SELECT id,payload FROM quotes")
-        .all() as any[])
+        .all() as { id: string; payload: string }[])
         this.db
           .prepare("UPDATE quotes SET quote_hash=? WHERE id=?")
           .run((parse(String(row.payload)) as Quote).quoteHash, row.id);
@@ -197,7 +230,7 @@ export class ExecutionStore {
   getQuote(id: string) {
     const r = this.db
       .prepare("SELECT payload FROM quotes WHERE id=?")
-      .get(id) as any;
+      .get(id) as { payload?: string } | undefined;
     return r ? (parse(String(r.payload)) as Quote) : undefined;
   }
   findQuoteByHash(hash: string) {
@@ -205,7 +238,7 @@ export class ExecutionStore {
       .prepare(
         "SELECT payload FROM quotes WHERE quote_hash=? ORDER BY rowid LIMIT 1",
       )
-      .get(hash) as any;
+      .get(hash) as { payload?: string } | undefined;
     return r ? (parse(String(r.payload)) as Quote) : undefined;
   }
   create(
@@ -231,13 +264,13 @@ export class ExecutionStore {
   get(id: string) {
     const r = this.db
       .prepare("SELECT payload FROM executions WHERE id=?")
-      .get(id) as any;
+      .get(id) as { payload?: string } | undefined;
     return r ? (parse(String(r.payload)) as Execution) : undefined;
   }
   byIdempotency(k: string) {
     const r = this.db
       .prepare("SELECT payload FROM executions WHERE idempotency_key=?")
-      .get(k) as any;
+      .get(k) as { payload?: string } | undefined;
     return r ? (parse(String(r.payload)) as Execution) : undefined;
   }
   list(states: readonly TradeState[]) {
@@ -248,7 +281,7 @@ export class ExecutionStore {
         .prepare(
           `SELECT payload FROM executions WHERE state IN (${marks}) ORDER BY rowid`,
         )
-        .all(...states) as any[]
+        .all(...states) as { payload: string }[]
     ).map((r) => parse(String(r.payload)) as Execution);
   }
   transition(
@@ -294,12 +327,13 @@ export class ExecutionStore {
     this.db.close();
   }
 }
+
 export class TradingOrchestrator {
   constructor(
     private c: {
-      chainId: number;
-      account: Address;
-      router: Address;
+      cluster: string;
+      /** base58 fee payer the isolated signer holds */
+      account: string;
       policy: TradingPolicy;
       rpc: TradingRpc;
       store: ExecutionStore;
@@ -323,19 +357,35 @@ export class TradingOrchestrator {
       audience?: string;
     },
   ) {}
+
+  private get policyHash() {
+    return this.c.policy.hash ?? digest(this.c.policy);
+  }
+  private now() {
+    return (this.c.clock ?? Date.now)();
+  }
+  private mint(value: string, label: string) {
+    if (!isPublicKey(value)) throw Error(`invalid ${label}`);
+    return value;
+  }
+
   async quote(raw: {
     side: TradeSide;
-    tokenIn: Address;
-    tokenOut: Address;
+    inputMint: string;
+    outputMint: string;
     amountIn: bigint;
     slippageBps: number;
   }) {
     if (
       Object.keys(raw).some(
         (k) =>
-          !["side", "tokenIn", "tokenOut", "amountIn", "slippageBps"].includes(
-            k,
-          ),
+          ![
+            "side",
+            "inputMint",
+            "outputMint",
+            "amountIn",
+            "slippageBps",
+          ].includes(k),
       )
     )
       throw Error("unknown field");
@@ -344,35 +394,38 @@ export class TradingOrchestrator {
       throw Error("amount exceeds policy");
     if (raw.slippageBps < 0 || raw.slippageBps > this.c.policy.maxSlippageBps)
       throw Error("slippage exceeds policy");
-    const tokenIn = getAddress(raw.tokenIn),
-      tokenOut = getAddress(raw.tokenOut),
-      allowed = this.c.policy.allowedTokens?.map(getAddress);
-    if (allowed && (!allowed.includes(tokenIn) || !allowed.includes(tokenOut)))
-      throw Error("token denied");
-    const r = await this.c.rpc.quote({ ...raw, tokenIn, tokenOut }),
-      policyHash = this.c.policy.hash ?? digest(this.c.policy),
+    const inputMint = this.mint(raw.inputMint, "inputMint"),
+      outputMint = this.mint(raw.outputMint, "outputMint"),
+      allowed = this.c.policy.allowedMints;
+    if (
+      allowed &&
+      (!allowed.includes(inputMint) || !allowed.includes(outputMint))
+    )
+      throw Error("mint denied");
+    const r = await this.c.rpc.quote({ ...raw, inputMint, outputMint }),
+      policyHash = this.policyHash,
       minimumOut = (r.amountOut * BigInt(10000 - raw.slippageBps)) / 10000n;
     const core = {
       side: raw.side,
-      chainId: this.c.chainId,
-      account: getAddress(this.c.account),
-      router: getAddress(this.c.router),
-      tokenIn,
-      tokenOut,
+      cluster: this.c.cluster,
+      account: this.c.account,
+      inputMint,
+      outputMint,
       amountIn: raw.amountIn,
       minimumOut,
       route: r.route,
       policyHash,
-      blockNumber: r.blockNumber,
-      blockHash: r.blockHash ?? r.evidence?.blockHash,
+      slot: r.slot,
+      lastValidBlockHeight: r.lastValidBlockHeight,
       expiresAt: r.expiresAt,
-      serialized: r.request?.serialized,
+      transaction: r.request?.transaction,
     };
     const q: Quote = {
       id: randomUUID(),
       ...raw,
-      tokenIn,
-      tokenOut,
+      cluster: this.c.cluster,
+      inputMint,
+      outputMint,
       ...r,
       minimumOut,
       policyHash,
@@ -380,48 +433,51 @@ export class TradingOrchestrator {
       quoteHash: digest({ ...core, amountOut: r.amountOut }),
       ...(r.request
         ? {
-            serialized: r.request.serialized,
-            transactionHash: r.request.transactionHash,
+            transaction: r.request.transaction,
+            messageHash: r.request.messageHash,
           }
         : {}),
     };
     return this.c.store.putQuote(q);
   }
+
   /**
-   * Pin the exact ERC-20 approve(router, 0) transaction that clears the
-   * router allowance for a token. The result flows through the same
-   * lifecycle as a swap quote: execute -> approve -> submit -> reconcile,
-   * with exact-transaction approval, one-time authorization, and the
-   * isolated signer's own policy checks. The token is deliberately not
-   * restricted to the trading allowlist: revoking an allowance only ever
-   * reduces exposure, and operators most need it for tokens they no
-   * longer trust; the signer policy's `to` allowlist remains the final
-   * authority on which contracts may be called.
+   * Pin the exact SPL Token `Revoke` that clears a delegate on a token account.
+   *
+   * The result flows through the same lifecycle as a swap quote: execute ->
+   * approve -> submit -> reconcile, with exact-transaction approval, one-time
+   * authorization, and the isolated signer's own policy re-check. The token
+   * account is deliberately not restricted to the trading allowlist — revoking
+   * a delegate only ever reduces exposure, and operators most need it for
+   * tokens they no longer trust. The signer policy's program allowlist remains
+   * the final authority on what may be invoked.
    */
-  async revokeQuote(tokenRaw: Address) {
-    const token = getAddress(tokenRaw),
-      spender = getAddress(this.c.router);
+  async revokeQuote(tokenAccountRaw: string) {
+    const tokenAccount = this.mint(tokenAccountRaw, "tokenAccount");
     if (!this.c.rpc.revokeQuote) throw Error("revoke_unsupported");
-    const r = await this.c.rpc.revokeQuote({ token, spender });
+    const r = await this.c.rpc.revokeQuote({
+      tokenAccount,
+      owner: this.c.account,
+    });
     if (!r.request || !r.evidence) throw Error("exact_transaction_required");
-    const policyHash = this.c.policy.hash ?? digest(this.c.policy);
+    const policyHash = this.policyHash;
     const core = {
       side: "revoke" as const,
-      chainId: this.c.chainId,
-      account: getAddress(this.c.account),
-      router: spender,
-      token,
+      cluster: this.c.cluster,
+      account: this.c.account,
+      tokenAccount,
       policyHash,
-      blockNumber: r.blockNumber,
-      blockHash: r.blockHash ?? r.evidence.blockHash,
+      slot: r.slot,
+      lastValidBlockHeight: r.lastValidBlockHeight,
       expiresAt: r.expiresAt,
-      serialized: r.request.serialized,
+      transaction: r.request.transaction,
     };
     const q: Quote = {
       id: randomUUID(),
       side: "revoke",
-      tokenIn: token,
-      tokenOut: token,
+      cluster: this.c.cluster,
+      inputMint: tokenAccount,
+      outputMint: tokenAccount,
       amountIn: 0n,
       slippageBps: 0,
       ...r,
@@ -429,20 +485,22 @@ export class TradingOrchestrator {
       policyHash,
       intentHash: digest(core),
       quoteHash: digest({ ...core, evidenceHash: r.evidence.hash }),
-      serialized: r.request.serialized,
-      transactionHash: r.request.transactionHash,
+      transaction: r.request.transaction,
+      messageHash: r.request.messageHash,
     };
     return this.c.store.putQuote(q);
   }
+
   async revoke(
-    tokenRaw: Address,
+    tokenAccount: string,
     o: { idempotencyKey: string; actor: string; dryRun?: boolean },
   ) {
     const old = this.c.store.byIdempotency(o.idempotencyKey);
     if (old) return old;
-    const q = await this.revokeQuote(tokenRaw);
+    const q = await this.revokeQuote(tokenAccount);
     return this.execute(q.id, o);
   }
+
   async execute(
     quoteId: string,
     o: { idempotencyKey: string; actor: string; dryRun?: boolean },
@@ -451,8 +509,7 @@ export class TradingOrchestrator {
     if (old) return old;
     const q = this.c.store.getQuote(quoteId);
     if (!q) throw Error("quote_not_found");
-    if (q.expiresAt < (this.c.clock ?? Date.now)())
-      throw Error("quote_expired");
+    if (q.expiresAt < this.now()) throw Error("quote_expired");
     const dryRun = o.dryRun ?? true;
     if (!dryRun && !this.c.liveEnabled) throw Error("live_trading_disabled");
     let evidence = q.evidence;
@@ -461,11 +518,11 @@ export class TradingOrchestrator {
       if (!("hash" in got)) throw Error("simulation_evidence_required");
       evidence = got;
     } else {
-      const got: any = await this.c.rpc.simulate({
+      const got = await this.c.rpc.simulate({
         intentHash: q.intentHash,
-        blockNumber: q.blockNumber,
+        slot: q.slot,
       });
-      if (!got.success) throw Error("simulation_failed");
+      if (!("success" in got) || !got.success) throw Error("simulation_failed");
     }
     if (dryRun)
       return this.c.store.create(
@@ -482,11 +539,12 @@ export class TradingOrchestrator {
         "dry-run",
       );
     if (!q.request || !evidence) throw Error("exact_transaction_required");
-    if (
-      evidence.transactionHash !== q.request.transactionHash ||
-      evidence.blockHash !== (q.blockHash ?? evidence.blockHash)
-    )
+    if (evidence.messageHash !== q.request.messageHash)
       throw Error("simulation_transaction_mismatch");
+    // Queueing an approval for a transaction whose blockhash is already dead
+    // wastes an operator's attention on something that can never be submitted.
+    if ((await this.c.rpc.blockHeight()) > q.lastValidBlockHeight)
+      throw Error("blockhash_expired");
     const risk = await this.c.risk?.assess({
       quote: q,
       request: q.request,
@@ -496,7 +554,7 @@ export class TradingOrchestrator {
     const reservationId = await this.c.reservations?.reserve({
       quoteHash: q.quoteHash,
       policyHash: q.policyHash,
-      transactionHash: q.request.transactionHash,
+      messageHash: q.request.messageHash,
     });
     const x = this.c.store.create({
       quoteId,
@@ -509,6 +567,7 @@ export class TradingOrchestrator {
       actor: o.actor,
       dryRun,
       idempotencyKey: o.idempotencyKey,
+      lastValidBlockHeight: q.lastValidBlockHeight,
     });
     if (!this.c.policy.approvalRequired)
       return this.c.store.transition(x.id, "awaiting-approval", {
@@ -528,35 +587,69 @@ export class TradingOrchestrator {
     );
     return this.c.store.transition(x.id, "awaiting-approval", { approvalId });
   }
-  private binding(q: Quote, e: SimulationEvidence): any {
-    const t = q.request!.transaction;
+
+  /**
+   * Project a Solana execution into the approval engine's request shape.
+   *
+   * `src/execution/approvals` still speaks EVM (`nonce`, `value`, `calldata`,
+   * `router`), and it is outside this rewrite. Rather than leave those slots
+   * empty, each carries its honest Solana counterpart, listed below so the
+   * mapping is auditable rather than implied. Renaming them in the approvals
+   * module is tracked separately; nothing here depends on the names.
+   *
+   *   chain    -> cluster
+   *   account  -> fee payer
+   *   router   -> the program ids the transaction invokes
+   *   calldata -> base64 message bytes, i.e. exactly what will be signed
+   *   nonce    -> recent blockhash, Solana's replay fence
+   *   value    -> the input leg, in base units of the mint leaving the wallet
+   */
+  private binding(q: Quote, e: SimulationEvidence) {
+    const r = q.request!;
     return {
-      chain: String(this.c.chainId),
-      serializedTransaction: { ...t, serialized: q.request!.serialized },
+      chain: q.cluster,
+      serializedTransaction: {
+        transaction: r.transaction,
+        message: r.message,
+        messageHash: r.messageHash,
+        feePayer: r.feePayer,
+        recentBlockhash: r.recentBlockhash,
+        lastValidBlockHeight: r.lastValidBlockHeight,
+        programIds: r.programIds,
+        accountKeys: r.accountKeys,
+        instructions: r.instructions,
+        addressTableLookups: r.addressTableLookups,
+        to: r.programIds.join(","),
+        data: r.message,
+        value: String(q.amountIn),
+        nonce: r.recentBlockhash,
+      },
       intentHash: q.intentHash,
       policyHash: q.policyHash,
       policyVersion: String(this.c.policy.version),
       simulationHash: e.hash,
-      simulationBlock: String(e.blockNumber),
-      simulationState: e.blockHash,
-      account: this.c.account,
-      nonce: String(t.nonce),
-      value: String(t.value),
-      calldata: t.data,
-      router: t.to,
+      simulationBlock: String(e.slot),
+      simulationState: e.blockhash,
+      account: r.feePayer,
+      nonce: r.recentBlockhash,
+      value: String(q.amountIn),
+      calldata: r.message,
+      router: r.programIds.join(","),
     };
   }
+
   assertExact(id: string, r: SimulationRequest) {
     const x = this.require(id),
       q = this.c.store.getQuote(x.quoteId);
     if (
       !q?.request ||
-      q.request.serialized.toLowerCase() !== r.serialized.toLowerCase() ||
-      q.request.transactionHash !== r.transactionHash
+      q.request.transaction !== r.transaction ||
+      q.request.messageHash !== r.messageHash
     )
       throw Error("exact transaction mismatch");
     return true;
   }
+
   approve(
     id: string,
     operator: string,
@@ -573,6 +666,7 @@ export class TradingOrchestrator {
     else if (this.c.approvalEngine) throw Error("decision proof required");
     return this.refreshApproval(id, operator);
   }
+
   deny(
     id: string,
     operator: string,
@@ -589,6 +683,7 @@ export class TradingOrchestrator {
     });
     return this.refreshApproval(id, operator);
   }
+
   refreshApproval(id: string, operator?: string) {
     const x = this.require(id);
     if (x.state !== "awaiting-approval") return x;
@@ -608,6 +703,19 @@ export class TradingOrchestrator {
       });
     return x;
   }
+
+  /**
+   * Burn the execution because its blockhash can no longer land.
+   *
+   * Terminal by construction: the reservation is released and no signature is
+   * ever produced for these bytes. Recovery means a new quote, not a retry.
+   */
+  private async expire(id: string, from: TradeState | TradeState[]) {
+    const x = this.c.store.get(id);
+    if (x?.reservationId) await this.c.reservations?.release(x.reservationId);
+    return this.c.store.transition(id, from, { state: "expired" });
+  }
+
   async submit(id: string) {
     let x = this.require(id);
     if (x.state !== "approved" && x.state !== "signing")
@@ -618,12 +726,14 @@ export class TradingOrchestrator {
     if (!q?.request || !q.evidence) throw Error("exact_transaction_required");
     if (!this.c.liveEnabled || !this.c.signer || !this.c.authorizationIssuer)
       throw Error("signer unavailable");
-    if (
-      q.expiresAt <= (this.c.clock ?? Date.now)() ||
-      (q.blockHash &&
-        (await this.c.rpc.blockHash(q.blockNumber)) !== q.blockHash)
-    )
-      throw Error("quote_stale_or_reorged");
+    if (q.expiresAt <= this.now()) throw Error("quote_expired");
+    // The Solana replay fence. Past this height the transaction is dead; the
+    // execution is burned rather than re-quoted under a fresh blockhash behind
+    // the operator's back.
+    if ((await this.c.rpc.blockHeight()) > q.lastValidBlockHeight) {
+      await this.expire(id, x.state);
+      throw Error("blockhash_expired");
+    }
     if (
       x.reservationId &&
       this.c.reservations &&
@@ -654,24 +764,26 @@ export class TradingOrchestrator {
         authorizationId: env.claims.id,
       });
       const signed = await this.c.signer.sign({
-        serialized: q.request.serialized,
+        transaction: q.request.transaction,
         envelope: env,
-        authorizationToken: env.claims.id,
       });
-      const raw = typeof signed === "string" ? signed : signed.raw,
-        rawHash = typeof signed === "string" ? keccak256(signed) : signed.hash;
+      const signature = assertSignedTransaction(signed);
+      // Persist before broadcasting: after this point a crash is recoverable by
+      // looking the signature up, never by producing a second one.
       x = this.c.store.transition(id, "signing", {
         state: "submitting",
         authorizationId: env.claims.id,
-        rawTransactionHash: rawHash,
+        messageHash: q.request.messageHash,
+        signature,
+        lastValidBlockHeight: q.lastValidBlockHeight,
       });
-      const txHash = await this.c.rpc.broadcast(raw);
-      if (txHash.toLowerCase() !== rawHash.toLowerCase())
-        throw Error("broadcast_hash_mismatch");
+      const landed =
+        signed.broadcast ?? (await this.c.rpc.broadcast(signed.transaction));
+      if (landed !== signature) throw Error("broadcast_signature_mismatch");
       await this.c.reservations?.commit(x.reservationId!);
       return this.c.store.transition(id, "submitting", {
         state: "broadcast",
-        txHash,
+        signature: landed,
       });
     } catch (e) {
       const now = this.require(id);
@@ -682,6 +794,7 @@ export class TradingOrchestrator {
       throw e;
     }
   }
+
   recover(id: string) {
     const x = this.require(id);
     if (x.state === "submitting")
@@ -690,6 +803,16 @@ export class TradingOrchestrator {
       });
     return x;
   }
+
+  /**
+   * Recover an execution stranded in `signing`.
+   *
+   * A dropped signing response is the case that must never produce a second
+   * signature: the daemon may already have signed, and re-issuing an
+   * authorization would authorize the same intent twice. So the signature is
+   * *retrieved* from the signer's durable store, verified against the bytes it
+   * came with, and broadcast once.
+   */
   async recoverSigning(row: Execution) {
     const q = this.c.store.getQuote(row.quoteId);
     if (!q?.request) throw Error("exact_transaction_required");
@@ -697,40 +820,37 @@ export class TradingOrchestrator {
     if (!this.c.signer?.result) throw Error("signer_result_unavailable");
     const signed = await this.c.signer.result({
       authorizationId: row.authorizationId,
-      transactionHash: q.request.transactionHash,
+      messageHash: q.request.messageHash,
       recoverRaw: true,
     });
+    if (signed.state === "expired") {
+      await this.expire(row.id, "signing");
+      throw Error("authorization_expired");
+    }
     if (signed.state === "not_found") throw Error("signer_result_not_found");
-    if (signed.state !== "signed" || !signed.hash)
-      throw Error("signer_result_invalid");
-    if (
-      signed.hash.toLowerCase() !==
-        keccak256(signed.raw ?? "0x").toLowerCase() &&
-      !signed.raw
-    )
-      throw Error("signer_result_raw_unavailable");
-    if (
-      !signed.raw ||
-      keccak256(signed.raw).toLowerCase() !== signed.hash.toLowerCase()
-    )
-      throw Error("signer_result_invalid");
+    if (signed.state !== "signed") throw Error("signer_result_invalid");
+    if (!signed.transaction) throw Error("signer_result_raw_unavailable");
+    const signature = assertSignedTransaction(signed as SignerSignResponse);
     const x = this.c.store.transition(row.id, "signing", {
       state: "submitting",
-      rawTransactionHash: signed.hash,
+      messageHash: q.request.messageHash,
+      signature,
+      lastValidBlockHeight: q.lastValidBlockHeight,
     });
-    const txHash = await this.c.rpc.broadcast(signed.raw);
-    if (txHash.toLowerCase() !== signed.hash.toLowerCase()) {
+    const landed = await this.c.rpc.broadcast(signed.transaction);
+    if (landed !== signature) {
       this.c.store.transition(row.id, "submitting", {
         state: "reconciliation-required",
       });
-      throw Error("broadcast_hash_mismatch");
+      throw Error("broadcast_signature_mismatch");
     }
     await this.c.reservations?.commit(x.reservationId!);
     return this.c.store.transition(row.id, "submitting", {
       state: "broadcast",
-      txHash,
+      signature: landed,
     });
   }
+
   async recoverAndReconcile(limit = 100) {
     const rows = this.c.store
         .list([
@@ -760,42 +880,50 @@ export class TradingOrchestrator {
     }
     return result;
   }
+
+  /**
+   * Settle a broadcast execution without ever re-signing or resubmitting.
+   *
+   * A signature the cluster has never seen is not yet a failure — until its
+   * blockhash passes `lastValidBlockHeight`, at which point it can never land
+   * and the execution is `dropped`, terminally.
+   */
   async reconcile(id: string) {
     const x = this.require(id);
-    const hash = x.txHash ?? x.rawTransactionHash;
-    if (!hash) throw Error("transaction_not_broadcast");
-    const r = await this.c.rpc.receipt(hash);
-    if (!r)
+    if (!x.signature) throw Error("transaction_not_broadcast");
+    const status = await this.c.rpc.status(x.signature);
+    if (!status) {
+      if (
+        x.lastValidBlockHeight !== undefined &&
+        (await this.c.rpc.blockHeight()) > x.lastValidBlockHeight
+      ) {
+        if (x.reservationId)
+          await this.c.reservations?.release(x.reservationId);
+        return this.c.store.transition(id, x.state, { state: "dropped" });
+      }
       return x.state === "reconciliation-required"
         ? x
         : this.c.store.transition(id, x.state, {
             state: "reconciliation-required",
           });
-    if (
-      x.blockNumber &&
-      x.blockHash &&
-      (await this.c.rpc.blockHash(x.blockNumber)) !== x.blockHash
-    )
-      return this.c.store.transition(id, x.state, {
-        state: "reconciliation-required",
-      });
-    if (r.status === "reverted")
+    }
+    if (status.err)
       return this.c.store.transition(id, x.state, {
         state: "failed",
-        txHash: hash,
-        blockNumber: r.blockNumber,
-        blockHash: r.blockHash,
+        signature: x.signature,
+        slot: status.slot,
       });
+    const final =
+      status.confirmationStatus === "finalized" ||
+      (this.c.policy.finalityCommitment === "confirmed" &&
+        status.confirmationStatus === "confirmed");
     return this.c.store.transition(id, x.state, {
-      state:
-        r.confirmations >= this.c.policy.finalityBlocks
-          ? "finalized"
-          : "confirmed",
-      txHash: hash,
-      blockNumber: r.blockNumber,
-      blockHash: r.blockHash,
+      state: final ? "finalized" : "confirmed",
+      signature: x.signature,
+      slot: status.slot,
     });
   }
+
   status(id: string) {
     const x = this.require(id);
     if (!x.approvalId || !this.c.approvalEngine) return x;
@@ -808,12 +936,50 @@ export class TradingOrchestrator {
         }
       : x;
   }
+
   private require(id: string) {
     const x = this.c.store.get(id);
     if (!x) throw Error("execution_not_found");
     return x;
   }
 }
+
+/**
+ * Prove a signer response is internally consistent before acting on it.
+ *
+ * The bytes are decoded here and the signature is read off the wire, so a
+ * daemon that reported one signature while returning another — or returned
+ * unsigned bytes — is caught on this side of the boundary.
+ */
+function assertSignedTransaction(signed: {
+  transaction?: string;
+  signature?: string;
+}): string {
+  if (
+    typeof signed?.transaction !== "string" ||
+    typeof signed.signature !== "string" ||
+    !signed.signature
+  )
+    throw Error("invalid_signer_response");
+  let attached: string;
+  try {
+    attached = signatureOf(signed.transaction);
+  } catch {
+    throw Error("invalid_signer_response");
+  }
+  if (attached !== signed.signature) throw Error("invalid_signer_response");
+  return attached;
+}
+
+/**
+ * The host end of the signer daemon's local socket.
+ *
+ * Every method returns one of the shared wire types in
+ * `src/execution/authorization/wire.ts`, which are derived from
+ * `SignerService`'s own signatures. That is the whole point: this class used to
+ * speak a protocol the daemon had stopped speaking, and it typechecked
+ * perfectly while doing so.
+ */
 export class UnixSignerClient implements IsolatedSigner {
   constructor(
     private socketPath: string,
@@ -821,7 +987,7 @@ export class UnixSignerClient implements IsolatedSigner {
     private timeoutMs = 5000,
   ) {}
   private request(payload: unknown) {
-    return new Promise<any>((resolve, reject) => {
+    return new Promise<Record<string, unknown>>((resolve, reject) => {
       const s = createConnection(toIpcPath(this.socketPath));
       let data = "";
       const timer = setTimeout(
@@ -859,16 +1025,16 @@ export class UnixSignerClient implements IsolatedSigner {
     const v = await this.request({ method: "status" });
     if (
       !v ||
-      typeof v.account !== "string" ||
-      !Array.isArray(v.chainIds) ||
-      !v.chainIds.every((x: unknown) => Number.isSafeInteger(x)) ||
+      !isPublicKey(v.account) ||
+      typeof v.cluster !== "string" ||
+      !v.cluster ||
       typeof v.policyHash !== "string" ||
       !Number.isSafeInteger(v.policyVersion) ||
       typeof v.authorizationKeyId !== "string" ||
       typeof v.serviceVersion !== "string"
     )
       throw Error("invalid_signer_status");
-    return { ...v, account: getAddress(v.account) };
+    return v as unknown as SignerStatus;
   }
   async probe() {
     try {
@@ -879,25 +1045,34 @@ export class UnixSignerClient implements IsolatedSigner {
     }
   }
   async sign(request: {
-    serialized: Hex;
+    transaction: string;
     envelope: AuthorizationEnvelope;
-    authorizationToken: string;
-  }) {
-    const v = await this.request({
-      method: "sign",
-      serialized: request.serialized,
-      envelope: request.envelope,
-      authorizationToken: request.authorizationToken,
-    });
-    if (!v.raw || !v.hash || keccak256(v.raw) !== v.hash)
+    broadcast?: boolean;
+  }): Promise<SignerSignResponse> {
+    const v = await this.request({ method: "sign", ...request });
+    const signature = assertSignedTransaction(
+      v as { transaction?: string; signature?: string },
+    );
+    if (v.broadcast !== undefined && v.broadcast !== signature)
       throw Error("invalid_signer_response");
-    return v;
+    return v as unknown as SignerSignResponse;
   }
   async result(request: {
     authorizationId: string;
-    transactionHash: Hex;
+    messageHash: string;
     recoverRaw?: boolean;
-  }) {
-    return this.request({ method: "result", ...request });
+  }): Promise<SignerResultResponse> {
+    const v = await this.request({ method: "result", ...request });
+    const state = v?.state;
+    if (state === "expired" || state === "not_found") return { state };
+    if (state !== "signed" || typeof v.signature !== "string" || !v.signature)
+      throw Error("invalid_signer_response");
+    // A recovered result may or may not carry the signed bytes; when it does,
+    // they must actually carry the signature it reports.
+    if (v.transaction !== undefined)
+      assertSignedTransaction(
+        v as { transaction?: string; signature?: string },
+      );
+    return v as unknown as SignerResultResponse;
   }
 }

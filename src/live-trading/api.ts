@@ -110,7 +110,7 @@ export function registerTradingApi(
     if (!k) return;
     try {
       return r.code(202).send(
-        await c.trading.revoke(q.body?.token, {
+        await c.trading.revoke(q.body?.tokenAccount, {
           idempotencyKey: k,
           actor: c.principal(q).subject,
           dryRun: q.body?.dryRun ?? true,

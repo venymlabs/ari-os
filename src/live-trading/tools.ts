@@ -2,11 +2,12 @@ import { z } from "zod";
 import type { ToolRegistry } from "../agent/tools/registry.js";
 import { TRADING_CAPABILITIES } from "../agent/types.js";
 import type { TradingOrchestrator } from "./index.js";
-const address = z.string().regex(/^0x[0-9a-fA-F]{40}$/);
+/** base58, 32 bytes — the alphabet excludes 0, O, I and l. */
+const mint = z.string().regex(/^[1-9A-HJ-NP-Za-km-z]{32,44}$/);
 const input = z
   .object({
-    tokenIn: address,
-    tokenOut: address,
+    inputMint: mint,
+    outputMint: mint,
     amountIn: z.string().regex(/^[1-9][0-9]*$/),
     slippageBps: z.number().int().min(0).max(10_000),
     dryRun: z.boolean().default(true),
@@ -21,7 +22,7 @@ export function registerTradingTools(
   for (const side of ["buy", "sell"] as const)
     r.register({
       name: `trade.${side}`,
-      description: `Create a typed ${side} intent; never accepts target or calldata`,
+      description: `Create a typed ${side} intent; never accepts a program, account list or instruction data`,
       inputSchema: input,
       outputSchema: output,
       capabilities: [TRADING_CAPABILITIES.ORDER_WRITE],
@@ -30,8 +31,8 @@ export function registerTradingTools(
       execute: async (x) => {
         const q = await trading.quote({
           side,
-          tokenIn: x.tokenIn as `0x${string}`,
-          tokenOut: x.tokenOut as `0x${string}`,
+          inputMint: x.inputMint,
+          outputMint: x.outputMint,
           amountIn: BigInt(x.amountIn),
           slippageBps: x.slippageBps,
         });

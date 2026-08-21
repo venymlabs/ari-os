@@ -95,14 +95,14 @@ async function localServices(): Promise<{
           portfolio: async () => {
             if (!config.rpc || !config.trading)
               throw Error("trading not configured");
+            // Lamports, read as a bigint out of the RPC context envelope.
+            const balance = await httpRpc(config.rpc.url, "getBalance", [
+              config.trading.account,
+              { commitment: "confirmed" },
+            ]);
             return {
               address: config.trading.account,
-              nativeBalance: BigInt(
-                await httpRpc(config.rpc.url, "eth_getBalance", [
-                  config.trading.account,
-                  "latest",
-                ]),
-              ).toString(),
+              nativeBalance: BigInt(balance?.value ?? balance ?? 0).toString(),
             };
           },
         }

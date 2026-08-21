@@ -10,7 +10,10 @@ import {
   reorgCorrection,
 } from "../src/autonomy/events/index.js";
 import { removeDir } from "./helpers.js";
+import { pubkey } from "./signer-fixtures.js";
 
+/** A launched mint. base58, because a launch event names a mint, not a symbol. */
+const MINT = pubkey(3);
 const dirs: string[] = [];
 afterEach(() => dirs.splice(0).forEach((d) => removeDir(d)));
 const event = (
@@ -52,7 +55,7 @@ describe("event envelopes", () => {
   });
   it("creates explicit corrections for orphaned chain events", () => {
     const original = event(
-      "noxa.launched",
+      "token.launched",
       {},
       {
         block: {
@@ -226,7 +229,7 @@ describe("market trigger engine", () => {
     });
     const types: string[] = [];
     for (const input of [
-      event("market.noxa.launch", { token: "NOXA" }),
+      event("market.token.launch", { token: MINT }),
       event("market.liquidity", { value: 60 }),
       event("market.price", { value: 11 }),
       event("market.volume", { value: 101 }),
@@ -235,7 +238,7 @@ describe("market trigger engine", () => {
     ])
       types.push(...t.evaluate(input).map((x) => x.type));
     expect(types).toEqual([
-      "trigger.noxa.launch",
+      "trigger.token.launch",
       "trigger.liquidity.threshold",
       "trigger.price.threshold",
       "trigger.volume.threshold",
@@ -252,19 +255,19 @@ describe("market trigger engine", () => {
       debounceMs: 10,
       priceAbove: 10,
     });
-    const p = event("market.price", { symbol: "NOXA", value: 11 });
+    const p = event("market.price", { symbol: "WIF", value: 11 });
     expect(t.evaluate(p)).toEqual([]);
     time = 11;
     expect(
-      t.evaluate(event("market.price", { symbol: "NOXA", value: 11 })),
+      t.evaluate(event("market.price", { symbol: "WIF", value: 11 })),
     ).toHaveLength(1);
     time = 20;
     expect(
-      t.evaluate(event("market.price", { symbol: "NOXA", value: 12 })),
+      t.evaluate(event("market.price", { symbol: "WIF", value: 12 })),
     ).toEqual([]);
     time = 112;
     expect(
-      t.evaluate(event("market.price", { symbol: "NOXA", value: 12 })),
+      t.evaluate(event("market.price", { symbol: "WIF", value: 12 })),
     ).toHaveLength(1);
     expect(t.evaluate(p)).toEqual([]);
   });
@@ -273,7 +276,7 @@ describe("market trigger engine", () => {
     dirs.push(dir);
     const path = join(dir, "triggers.db");
     let time = 0;
-    const input = event("market.price", { symbol: "NOXA", value: 11 });
+    const input = event("market.price", { symbol: "WIF", value: 11 });
     let t = new MarketTriggerEngine({
       statePath: path,
       now: () => time,
@@ -303,7 +306,7 @@ describe("market trigger engine", () => {
       priceAbove: 10,
     });
     expect(
-      t.evaluate(event("market.price", { symbol: "NOXA", value: 12 })),
+      t.evaluate(event("market.price", { symbol: "WIF", value: 12 })),
     ).toEqual([]);
     t.close();
   });

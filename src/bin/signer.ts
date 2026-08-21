@@ -5,7 +5,6 @@ import { chmod, lstat, mkdir, readFile, rm } from "node:fs/promises";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { realpathSync } from "node:fs";
-import { generatePrivateKey } from "viem/accounts";
 import {
   isWindows,
   permissionsAreUnsafe,
@@ -14,8 +13,10 @@ import {
 } from "../platform.js";
 import {
   createEncryptedKeystore,
+  generateSecretKey,
   JsonFrameDecoder,
   loadSignPolicy,
+  parseSecretKey,
   reconcileTransactions,
   SignerService,
   SqliteReplayStore,
@@ -30,7 +31,7 @@ const HELP = `raos-signer ${VERSION}
 Usage: raos-signer <create|import|status|serve|request|reconcile> [options]
 
 Options:
-  --rpc <url>                 JSON-RPC endpoint
+  --rpc <url>                 Solana JSON-RPC endpoint
   --key-id <id>               authorization key identifier
   --policy <path>             signer policy JSON file
   --keystore <path>           encrypted wallet file
@@ -98,10 +99,11 @@ export function createSignerWireConfig(
   authKey: string,
   audience: string,
   keyId: string | undefined,
-  policy: { hash: string; version: number },
+  policy: { hash: string; version: number; cluster: string },
 ) {
   return {
     audience,
+    cluster: policy.cluster,
     verifier: {
       verify: async (d: string, s: string, claimedKeyId?: string) => {
         if (keyId && claimedKeyId !== keyId) return false;
@@ -135,27 +137,23 @@ export async function main(argv = process.argv.slice(2)) {
   const keystore = String(a.keystore ?? "wallet.json");
   if (cmd === "create" || cmd === "import") {
     const password = await secret(Number(a["password-fd"] ?? 0), "Password");
+    // `import` accepts what real Solana tooling emits: solana-keygen's JSON
+    // byte array, or a base58 secret key. Never an argv value.
     let key =
       cmd === "create"
-        ? generatePrivateKey()
-        : ((await secret(
-            Number(a["key-fd"] ?? 0),
-            "Private key",
-          )) as `0x${string}`);
+        ? generateSecretKey()
+        : parseSecretKey(await secret(Number(a["key-fd"] ?? 0), "Secret key"));
     try {
       console.log(
         JSON.stringify({
-          address: await createEncryptedKeystore(
-            keystore,
-            key as `0x${string}`,
-            password,
-          ),
+          address: await createEncryptedKeystore(keystore, key, password),
         }),
       );
     } finally {
+      key.fill(0);
       // Best-effort: drop the local reference to the key material.
       // eslint-disable-next-line no-useless-assignment
-      key = "" as any;
+      key = new Uint8Array(0);
     }
     return;
   }
@@ -165,7 +163,7 @@ export async function main(argv = process.argv.slice(2)) {
     console.log(
       JSON.stringify({
         locked: true,
-        address: body.address,
+        address: body.publicKey,
         permissions: (st.mode & 0o777).toString(8),
       }),
     );
@@ -193,6 +191,7 @@ export async function main(argv = process.argv.slice(2)) {
     try {
       await reconcileTransactions(store, call);
     } finally {
+      account.lock();
       store.close();
     }
     return;
@@ -206,12 +205,13 @@ export async function main(argv = process.argv.slice(2)) {
         a["key-id"] ? String(a["key-id"]) : undefined,
         policy,
       ),
+      // Solana has no account nonce; the recent blockhash is the fence, and
+      // crossing its last valid height is terminal.
       ...(rpcUrl
         ? {
-            nonce: async (_chainId: number, address: string) =>
-              Number.parseInt(
-                await call("eth_getTransactionCount", [address, "pending"]),
-                16,
+            blockHeight: async () =>
+              Number(
+                await call("getBlockHeight", [{ commitment: "confirmed" }]),
               ),
           }
         : {}),
@@ -235,8 +235,8 @@ export async function main(argv = process.argv.slice(2)) {
               JSON.stringify({
                 ok: true,
                 result: {
-                  account: account.address,
-                  chainIds: [...policy.chainIds],
+                  account: account.publicKey,
+                  cluster: policy.cluster,
                   policyHash: policy.hash,
                   policyVersion: policy.version,
                   authorizationKeyId: String(a["key-id"] ?? ""),
@@ -252,7 +252,7 @@ export async function main(argv = process.argv.slice(2)) {
                 ok: true,
                 result: service.result(
                   q.authorizationId,
-                  q.transactionHash,
+                  q.messageHash,
                   q.recoverRaw === true,
                 ),
               }) + "\n",
@@ -260,11 +260,19 @@ export async function main(argv = process.argv.slice(2)) {
             continue;
           }
           if (q.method !== "sign") throw Error("method_invalid");
-          const raw = await service.signEnvelope(q.serialized, q.envelope);
-          const hash = q.broadcast
-            ? await broadcastSigned(store, q.envelope.claims.id, raw, call)
+          const signed = await service.signEnvelope(q.transaction, q.envelope);
+          const broadcast = q.broadcast
+            ? await broadcastSigned(
+                store,
+                q.envelope.claims.id,
+                signed.transaction,
+                call,
+              )
             : undefined;
-          c.write(JSON.stringify({ ok: true, result: { raw, hash } }) + "\n");
+          c.write(
+            JSON.stringify({ ok: true, result: { ...signed, broadcast } }) +
+              "\n",
+          );
         }
       } catch (e) {
         c.write(
@@ -279,6 +287,7 @@ export async function main(argv = process.argv.slice(2)) {
   });
   server.on("close", () => {
     clearInterval(reconcileTimer);
+    account.lock();
     store.close();
   });
   const reconcileInterval = Math.max(

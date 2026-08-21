@@ -1,0 +1,497 @@
+/* Chrome: the fixed instrument frame — nav rail, system strip, view headers. */
+
+.shell {
+  display: grid;
+  grid-template-columns: var(--rail) minmax(0, 1fr);
+  min-height: 100vh;
+}
+
+/* ── nav rail ────────────────────────────────────────────────────────────── */
+.rail {
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  border-right: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  background: var(--ink);
+  z-index: 60;
+}
+
+.rail-brand {
+  height: var(--strip);
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  padding: 0 14px;
+  flex: none;
+}
+
+.wordmark {
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: -0.085em;
+  line-height: 1;
+}
+
+.wordmark em {
+  font-family: var(--serif);
+  font-style: italic;
+  font-weight: 400;
+  color: var(--acid);
+  letter-spacing: -0.02em;
+}
+
+.wordmark-sup {
+  font-family: var(--mono);
+  font-size: 7.5px;
+  letter-spacing: 0.14em;
+  color: var(--bone-4);
+}
+
+.rail-nav {
+  display: flex;
+  flex-direction: column;
+  flex: none;
+}
+
+.rail-link {
+  position: relative;
+  display: grid;
+  grid-template-columns: 15px 1fr auto;
+  align-items: center;
+  gap: 11px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--line);
+  color: var(--bone-3);
+  cursor: pointer;
+  background: none;
+  border-left: 0;
+  border-right: 0;
+  border-top: 0;
+  text-align: left;
+  transition: color 0.15s, background 0.15s;
+}
+
+.rail-link .rl-idx {
+  font-family: var(--mono);
+  font-size: 8.5px;
+  letter-spacing: 0.06em;
+  color: var(--bone-4);
+}
+
+.rail-link .rl-label {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.rail-link .rl-count {
+  font-family: var(--mono);
+  font-size: 9px;
+  min-width: 17px;
+  height: 15px;
+  padding: 0 4px;
+  display: grid;
+  place-items: center;
+  background: var(--acid);
+  color: var(--ink);
+  letter-spacing: 0.02em;
+}
+
+.rail-link .rl-count.warn { background: var(--hazard); }
+
+.rail-link:hover { color: var(--bone); background: rgba(238, 241, 233, 0.03); }
+
+.rail-link.on {
+  color: var(--bone);
+  background: var(--ink-raise);
+}
+
+.rail-link.on::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: -1px;
+  bottom: -1px;
+  width: 2px;
+  background: var(--acid);
+}
+
+.rail-link.on .rl-idx { color: var(--acid); }
+
+/* the standing thesis — always on screen, never a decoration */
+.rail-thesis {
+  margin-top: auto;
+  border-top: 1px solid var(--line);
+  padding: 16px 14px;
+}
+
+.rail-thesis p {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.15;
+  letter-spacing: -0.045em;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.rail-thesis p em {
+  font-family: var(--serif);
+  font-style: italic;
+  font-weight: 400;
+  text-transform: none;
+  color: var(--acid);
+  letter-spacing: -0.01em;
+}
+
+.rail-foot {
+  border-top: 1px solid var(--line);
+  padding: 11px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: var(--bone-4);
+}
+
+/* ── system strip ────────────────────────────────────────────────────────── */
+.strip {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  min-height: var(--strip);
+  display: flex;
+  align-items: stretch;
+  border-bottom: 1px solid var(--line);
+  background: var(--ink);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.strip::-webkit-scrollbar { display: none; }
+
+.strip.halted {
+  background: var(--hazard);
+  border-bottom-color: var(--hazard);
+  color: var(--ink);
+}
+
+.strip.halted .sc-k { color: rgba(5, 7, 6, 0.62); }
+.strip.halted .sc { border-color: rgba(5, 7, 6, 0.28); }
+.strip.halted .pill { border-color: rgba(5, 7, 6, 0.45); color: var(--ink); }
+.strip.halted .pill i { background: var(--ink); box-shadow: none; }
+
+.sc {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 3px;
+  padding: 0 14px;
+  border-right: 1px solid var(--line);
+  white-space: nowrap;
+  flex: none;
+}
+
+.sc-k {
+  font-family: var(--mono);
+  font-size: 8px;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+  color: var(--bone-4);
+}
+
+.sc-v {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  font-variant-numeric: tabular-nums;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.sc.push { margin-left: auto; border-right: 0; border-left: 1px solid var(--line); }
+
+.sc-btn {
+  border: 0;
+  background: none;
+  cursor: pointer;
+  padding: 0 14px;
+  border-left: 1px solid var(--line);
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--bone-3);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  transition: background 0.14s, color 0.14s;
+}
+
+.sc-btn:hover { background: var(--bone); color: var(--ink); }
+
+/* ── view chrome ─────────────────────────────────────────────────────────── */
+.main { min-width: 0; }
+
+.view {
+  padding: 24px var(--pad) 88px;
+  min-width: 0;
+}
+
+.view-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 24px;
+  border-bottom: 1px solid var(--line-2);
+  padding-bottom: 16px;
+  margin-bottom: 22px;
+}
+
+.view-head h1 {
+  margin: 14px 0 0;
+  font-size: clamp(38px, 5vw, 82px);
+  font-weight: 600;
+  line-height: 0.8;
+  letter-spacing: -0.085em;
+  text-transform: uppercase;
+}
+
+.view-head h1 em {
+  font-family: var(--serif);
+  font-style: italic;
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: -0.03em;
+  color: var(--acid);
+}
+
+.view-head .vh-aside {
+  justify-self: end;
+  text-align: right;
+  color: var(--bone-3);
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  align-items: flex-end;
+}
+
+.view-sub {
+  max-width: 560px;
+  margin: 12px 0 0;
+  font-size: 13.5px;
+  line-height: 1.5;
+  color: var(--bone-3);
+}
+
+.grid {
+  display: grid;
+  gap: 14px;
+}
+
+.g2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.g3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.g-2-1 { grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); }
+.g-1-2 { grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); }
+
+.stack { display: flex; flex-direction: column; gap: 14px; }
+
+.rule {
+  height: 1px;
+  background: var(--line);
+  border: 0;
+  margin: 22px 0;
+}
+
+.empty {
+  padding: 40px 16px;
+  text-align: center;
+  color: var(--bone-4);
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+}
+
+/* ── the "what is this" one-pager ────────────────────────────────────────── */
+.intro {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background: rgba(3, 4, 3, 0.82);
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  overflow-y: auto;
+}
+
+.intro-sheet {
+  width: min(880px, 100%);
+  background: var(--bone);
+  color: var(--ink);
+  border: 1px solid var(--ink);
+  max-height: calc(100vh - 40px);
+  overflow-y: auto;
+}
+
+.intro-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border-bottom: 1px solid var(--ink);
+  padding: 10px 16px;
+}
+
+.intro-close {
+  border: 1px solid var(--ink);
+  background: none;
+  cursor: pointer;
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  color: var(--ink);
+  flex: none;
+}
+
+.intro-close:hover { background: var(--ink); color: var(--bone); }
+
+.intro-body { padding: 26px 26px 24px; }
+
+.intro-body h2 {
+  margin: 0 0 8px;
+  font-size: clamp(38px, 6vw, 74px);
+  line-height: 0.78;
+  letter-spacing: -0.085em;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.intro-body h2 em {
+  font-family: var(--serif);
+  font-style: italic;
+  font-weight: 400;
+  text-transform: none;
+  color: var(--model);
+  letter-spacing: -0.03em;
+}
+
+.intro-lede {
+  margin: 16px 0 22px;
+  max-width: 620px;
+  font-size: 16px;
+  line-height: 1.45;
+  letter-spacing: -0.025em;
+}
+
+.intro-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border-top: 1px solid rgba(5, 7, 6, 0.28);
+}
+
+.intro-list li {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  gap: 14px;
+  padding: 13px 0;
+  border-bottom: 1px solid rgba(5, 7, 6, 0.16);
+  align-items: start;
+}
+
+.intro-list b {
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  padding-top: 3px;
+  color: rgba(5, 7, 6, 0.55);
+}
+
+.intro-list strong {
+  display: block;
+  font-size: 15px;
+  letter-spacing: -0.035em;
+  text-transform: uppercase;
+  margin-bottom: 3px;
+}
+
+.intro-list span {
+  font-size: 13.5px;
+  line-height: 1.45;
+  color: rgba(5, 7, 6, 0.72);
+}
+
+.intro-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  border-top: 1px solid var(--ink);
+  padding: 14px 16px;
+}
+
+.intro-foot .btn {
+  border-color: var(--ink);
+  color: var(--ink);
+  background: var(--acid);
+}
+
+.intro-foot .btn:hover { background: var(--ink); color: var(--bone); }
+
+/* ── responsive: the rail becomes a scrolling index strip ────────────────── */
+@media (max-width: 980px) {
+  .shell { grid-template-columns: minmax(0, 1fr); }
+
+  .rail {
+    height: auto;
+    flex-direction: row;
+    align-items: stretch;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .rail::-webkit-scrollbar { display: none; }
+
+  .rail-brand {
+    border-bottom: 0;
+    border-right: 1px solid var(--line);
+    height: auto;
+    align-items: center;
+  }
+
+  .rail-nav { flex-direction: row; }
+
+  .rail-link {
+    grid-template-columns: auto auto;
+    border-bottom: 0;
+    border-right: 1px solid var(--line);
+    padding: 12px 13px;
+    gap: 8px;
+  }
+
+  .rail-link .rl-idx { display: none; }
+  .rail-link.on::before { top: auto; bottom: 0; left: 0; right: 0; width: auto; height: 2px; }
+
+  .rail-thesis,
+  .rail-foot { display: none; }
+
+  .view-head { grid-template-columns: minmax(0, 1fr); }
+  .view-head .vh-aside { justify-self: start; text-align: left; align-items: flex-start; }
+
+  .g2,
+  .g3,
+  .g-2-1,
+  .g-1-2 { grid-template-columns: minmax(0, 1fr); }
+}

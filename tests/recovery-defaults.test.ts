@@ -9,24 +9,24 @@ import {
 } from "../src/live-trading/index.js";
 import { registerTradingApi } from "../src/live-trading/api.js";
 import { removeDir } from "./helpers.js";
+import { CLUSTER, pubkey } from "./signer-fixtures.js";
 
-const A = "0x0000000000000000000000000000000000000001" as const;
+const A = pubkey(1);
 describe("automatic durable recovery and operational defaults", () => {
   it("recovers and reconciles all restart-sensitive states as a bounded error-isolated batch", async () => {
     const d = mkdtempSync(join(tmpdir(), "recover-")),
       store = new ExecutionStore(join(d, "e.sqlite")),
-      receipt = vi.fn(async () => null);
+      status = vi.fn(async () => null);
     try {
       const o = new TradingOrchestrator({
-        chainId: 1,
+        cluster: CLUSTER,
         account: A,
-        router: A,
         policy: {
           version: 1,
           maxAmountIn: 1n,
           maxSlippageBps: 1,
           approvalRequired: true,
-          finalityBlocks: 2,
+          finalityCommitment: "finalized",
         },
         store,
         rpc: {
@@ -40,8 +40,8 @@ describe("automatic durable recovery and operational defaults", () => {
           broadcast: async () => {
             throw Error();
           },
-          receipt,
-          blockHash: async () => null,
+          status,
+          blockHeight: async () => 0,
         },
       });
       const xs = [
